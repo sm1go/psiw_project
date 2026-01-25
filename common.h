@@ -3,61 +3,59 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
-#include <string.h>
+#include <unistd.h>
 #include <signal.h>
-#include <errno.h>
-#include <math.h>
+#include <string.h>
 
-#define PROJECT_ID 'Z'
-#define MAX_TEXT 512
-
-#define LIGHT 0
-#define HEAVY 1
-#define CAVALRY 2
-#define WORKER 3
-
-static const int COST[] = {100, 250, 550, 150};
-static const double ATTACK_VAL[] = {1.0, 1.5, 3.5, 0.0};
-static const double DEFENSE_VAL[] = {1.2, 3.0, 1.2, 0.0};
-static const int TIME_VAL[] = {2, 3, 5, 2};
+#define KLUCZ 54321
+#define MAX_GRACZY 2
 
 #define MSG_LOGIN 1
-#define MSG_BUILD 2
-#define MSG_ATTACK 3
-#define MSG_UPDATE 10
-#define MSG_RESULT 11
+#define MSG_STAN  2
+#define MSG_BUDUJ 3
+#define MSG_ATAK  4
+#define MSG_WYNIK 5
+#define MSG_START 6
+
+#define LEKKA     0
+#define CIEZKA    1
+#define JAZDA     2
+#define ROBOTNICY 3
 
 typedef struct {
-    int pid;
-    int is_active;
-    double gold;
-    int units[4];
-    int score;
-} Player;
+    int cena;
+    float atak;
+    float obrona;
+    int czas_produkcji;
+} JednostkaInfo;
 
-typedef struct {
-    Player players[2];
-} GameState;
+static const JednostkaInfo SPECYFIKACJA[4] = {
+    {100, 1.0, 1.2, 2},
+    {250, 1.5, 3.0, 3},
+    {550, 3.5, 1.2, 5},
+    {150, 0.0, 0.0, 2}
+};
 
 typedef struct {
     long mtype;
-    int source_id;
-    int cmd_type;
-    int unit_type;
-    int count;
-    int attack_army[4];
-    int gold_now;
-    int units_now[4];
-    int score_me;
-    int score_enemy;
-    char text[MAX_TEXT];
-} GameMsg;
+    int id_nadawcy;
+    int akcja;
+    int dane[4];
+    int wartosc;
+} Komunikat;
+
+typedef struct {
+    int surowce[2];
+    int armia[2][4];
+    int punkty[2];
+    int liczba_graczy;
+    int gra_aktywna;
+} StanGry;
 
 union semun {
     int val;

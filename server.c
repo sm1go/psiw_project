@@ -1,230 +1,208 @@
 #include "common.h"
+#include <math.h>
+#include <sys/wait.h>
 
-int shm_id, sem_id, msg_id;
-GameState *game;
+int msg_id, shm_id, sem_id;
+StanGry *stan;
 
-void sem_lock() {
-    struct sembuf sb = {0, -1, 0};
-    if (semop(sem_id, &sb, 1) == -1) {
-        if (errno != EINTR && errno != EIDRM) perror("sem_lock");
-    }
+void P(int sem_id) {
+    struct sembuf buf;
+    buf.sem_num = 0;
+    buf.sem_op = -1;
+    buf.sem_flg = SEM_UNDO;
+    semop(sem_id, &buf, 1);
 }
 
-void sem_unlock() {
-    struct sembuf sb = {0, 1, 0};
-    if (semop(sem_id, &sb, 1) == -1) {
-        if (errno != EINTR && errno != EIDRM) perror("sem_unlock");
-    }
-}
-
-void process_build(int player_id, int unit_type, int count) {
-    if (fork() == 0) {
-        for (int i = 0; i < count; i++) {
-            sleep(TIME_VAL[unit_type]);
-            sem_lock();
-            game->players[player_id].units[unit_type]++;
-            sem_unlock();
-        }
-        exit(0);
-    }
-}
-
-void calculate_battle_result(int att_id, int def_id, int *att_army) {
-    sem_lock();
-
-    double SA = 0;
-    for(int i=0; i<4; i++) SA += att_army[i] * ATTACK_VAL[i];
-
-    double SB = 0;
-    for(int i=0; i<4; i++) SB += game->players[def_id].units[i] * DEFENSE_VAL[i];
-
-    char report[MAX_TEXT];
-    sprintf(report, "Bitwa! Ty (Sila: %.1f) vs Wrog (Obrona: %.1f). ", SA, SB);
-
-    if (SA > SB) {
-        strcat(report, "ZWYCIESTWO! Baza wroga zniszczona.");
-        game->players[att_id].score++;
-
-        for(int i=0; i<4; i++) game->players[def_id].units[i] = 0;
-    } else {
-        strcat(report, "PORAZKA. Atak odparty.");
-
-        for(int i=0; i<4; i++) {
-            int X = game->players[def_id].units[i];
-            if(X > 0 && SB > 0) {
-                int lost = (int)floor(X * SA / SB);
-                game->players[def_id].units[i] -= lost;
-                if(game->players[def_id].units[i] < 0) game->players[def_id].units[i] = 0;
-            }
-        }
-
-        double SB_attack = 0;
-        for(int i=0; i<4; i++) SB_attack += game->players[def_id].units[i] * ATTACK_VAL[i];
-
-        double SA_defense = 0;
-        for(int i=0; i<4; i++) SA_defense += att_army[i] * DEFENSE_VAL[i];
-
-        if (SA_defense > 0) {
-             for(int i=0; i<4; i++) {
-                int X = att_army[i];
-                if (X > 0) {
-                    int lost = (int)floor(X * SB_attack / SA_defense);
-                    att_army[i] -= lost;
-                    if(att_army[i] < 0) att_army[i] = 0;
-                }
-             }
-        }
-    }
-
-    for(int i=0; i<4; i++) {
-        game->players[att_id].units[i] += att_army[i];
-    }
-
-    sem_unlock();
-
-    GameMsg msg;
-    msg.mtype = 20 + att_id;
-    msg.cmd_type = MSG_RESULT;
-    strcpy(msg.text, report);
-    msgsnd(msg_id, &msg, sizeof(GameMsg)-sizeof(long), IPC_NOWAIT);
-}
-
-void process_attack(int att_id, int *army_comp) {
-    if (fork() == 0) {
-        sleep(5);
-        int def_id = (att_id == 0) ? 1 : 0;
-        calculate_battle_result(att_id, def_id, army_comp);
-        exit(0);
-    }
-}
-
-void process_push_updates() {
-    if (fork() == 0) {
-        while(1) {
-            usleep(100000);
-            sem_lock();
-            
-            if (!game->players[0].is_active || !game->players[1].is_active) {
-                sem_unlock();
-                continue;
-            }
-
-            for(int i=0; i<2; i++) {
-                GameMsg update;
-                update.mtype = 10 + i;
-                update.cmd_type = MSG_UPDATE;
-                update.gold_now = (int)game->players[i].gold;
-                memcpy(update.units_now, game->players[i].units, sizeof(int)*4);
-                update.score_me = game->players[i].score;
-                update.score_enemy = game->players[(i==0)?1:0].score;
-                msgsnd(msg_id, &update, sizeof(GameMsg)-sizeof(long), IPC_NOWAIT);
-            }
-            sem_unlock();
-        }
-        exit(0);
-    }
-}
-
-void process_resources() {
-    if (fork() == 0) {
-        while(1) {
-            usleep(100000);
-            sem_lock();
-
-            if (!game->players[0].is_active || !game->players[1].is_active) {
-                sem_unlock();
-                continue;
-            }
-
-            for(int i=0; i<2; i++) {
-                double base_gain = 50.0 / 10.0;
-                double worker_gain = (game->players[i].units[WORKER] * 5.0) / 10.0;
-                game->players[i].gold += (base_gain + worker_gain);
-            }
-            sem_unlock();
-        }
-        exit(0);
-    }
+void V(int sem_id) {
+    struct sembuf buf;
+    buf.sem_num = 0;
+    buf.sem_op = 1;
+    buf.sem_flg = SEM_UNDO;
+    semop(sem_id, &buf, 1);
 }
 
 void cleanup(int sig) {
     msgctl(msg_id, IPC_RMID, NULL);
     shmctl(shm_id, IPC_RMID, NULL);
     semctl(sem_id, 0, IPC_RMID);
-    printf("\nSerwer zamkniety.\n");
     exit(0);
+}
+
+float oblicz_sile(int armia[], int tryb_atak) {
+    float suma = 0.0;
+    for(int i=0; i<4; i++) {
+        if(tryb_atak) suma += armia[i] * SPECYFIKACJA[i].atak;
+        else          suma += armia[i] * SPECYFIKACJA[i].obrona;
+    }
+    return suma;
 }
 
 int main() {
     signal(SIGINT, cleanup);
-    signal(SIGCHLD, SIG_IGN);
+    signal(SIGCHLD, SIG_IGN); 
 
-    key_t key = ftok(".", PROJECT_ID);
+    key_t klucz = KLUCZ;
+    
+    msg_id = msgget(klucz, IPC_CREAT | 0600);
+    if (msg_id == -1) { perror("msgget"); exit(1); }
 
-    shm_id = shmget(key, sizeof(GameState), IPC_CREAT | 0666);
-    game = (GameState*)shmat(shm_id, NULL, 0);
-    memset(game, 0, sizeof(GameState));
+    shm_id = shmget(klucz, sizeof(StanGry), IPC_CREAT | 0600);
+    if (shm_id == -1) { perror("shmget"); exit(1); }
+    stan = (StanGry*)shmat(shm_id, NULL, 0);
 
-    game->players[0].gold = 300;
-    game->players[1].gold = 300;
-
-    sem_id = semget(key, 1, IPC_CREAT | 0666);
+    sem_id = semget(klucz, 1, IPC_CREAT | 0600);
     union semun arg;
     arg.val = 1;
     semctl(sem_id, 0, SETVAL, arg);
 
-    msg_id = msgget(key, IPC_CREAT | 0666);
+    memset(stan, 0, sizeof(StanGry));
+    stan->surowce[0] = 300;
+    stan->surowce[1] = 300;
 
-    process_resources();
-    process_push_updates();
+    printf("Serwer uruchomiony.\n");
 
-    printf("Serwer gotowy. Czekam na graczy...\n");
+    if (fork() == 0) {
+        while(1) {
+            sleep(1);
+            P(sem_id);
+            if (stan->gra_aktywna) {
+                stan->surowce[0] += 50 + (stan->armia[0][ROBOTNICY] * 5);
+                stan->surowce[1] += 50 + (stan->armia[1][ROBOTNICY] * 5);
+            }
+            V(sem_id);
+        }
+    }
 
-    GameMsg msg;
+    Komunikat msg;
     while(1) {
-        if (msgrcv(msg_id, &msg, sizeof(GameMsg)-sizeof(long), 0, 0) == -1) {
-             if(errno != EINTR) perror("msgrcv");
-             continue;
-        }
+        if (msgrcv(msg_id, &msg, sizeof(msg) - sizeof(long), 10, 0) == -1) continue;
 
-        if (msg.cmd_type == MSG_UPDATE || msg.cmd_type == MSG_RESULT) continue;
+        int id = msg.id_nadawcy;
 
-        int pid = msg.source_id;
-
-        if (msg.cmd_type == MSG_LOGIN) {
-            printf("Gracz %d dolaczyl.\n", pid + 1);
-            sem_lock();
-            game->players[pid].is_active = 1;
-            game->players[pid].pid = msg.count;
-            sem_unlock();
-        }
-        else if (msg.cmd_type == MSG_BUILD) {
-            int cost = COST[msg.unit_type] * msg.count;
-            sem_lock();
-            if (game->players[pid].gold >= cost) {
-                game->players[pid].gold -= cost;
-                sem_unlock();
-                printf("G%d: Buduje %d x Typ %d\n", pid+1, msg.count, msg.unit_type);
-                process_build(pid, msg.unit_type, msg.count);
-            } else {
-                sem_unlock();
-            }
-        }
-        else if (msg.cmd_type == MSG_ATTACK) {
-            sem_lock();
-            int possible = 1;
-            for(int i=0; i<4; i++) {
-                if (game->players[pid].units[i] < msg.attack_army[i]) possible = 0;
+        switch(msg.akcja) {
+            case MSG_LOGIN: {
+                P(sem_id);
+                if (stan->liczba_graczy < 2) {
+                    msg.id_nadawcy = stan->liczba_graczy;
+                    stan->liczba_graczy++;
+                    if (stan->liczba_graczy == 2) {
+                        stan->gra_aktywna = 1;
+                        printf("Gra startuje!\n");
+                    }
+                    msg.wartosc = 1;
+                } else {
+                    msg.wartosc = 0;
+                }
+                V(sem_id);
+                
+                msg.mtype = msg.dane[0]; 
+                msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0);
+                break;
             }
 
-            if (possible && msg.unit_type != WORKER) {
-                for(int i=0; i<4; i++) game->players[pid].units[i] -= msg.attack_army[i];
-                sem_unlock();
+            case MSG_STAN: {
+                P(sem_id);
+                msg.wartosc = stan->surowce[id];
+                memcpy(msg.dane, stan->armia[id], sizeof(int)*4);
+                
+                int wygrana = 0;
+                if (stan->punkty[id] >= 5) wygrana = 1;
+                else if (stan->punkty[(id+1)%2] >= 5) wygrana = 2;
+                V(sem_id);
 
-                printf("G%d: Atakuje!\n", pid+1);
-                process_attack(pid, msg.attack_army);
-            } else {
-                sem_unlock();
+                msg.akcja = wygrana;
+                msg.mtype = id + 20;
+                msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0);
+                break;
+            }
+
+            case MSG_BUDUJ: {
+                int typ = msg.dane[0];
+                int ilosc = msg.dane[1];
+                int koszt = SPECYFIKACJA[typ].cena * ilosc;
+                int czas = SPECYFIKACJA[typ].czas_produkcji;
+
+                P(sem_id);
+                if (stan->surowce[id] >= koszt) {
+                    stan->surowce[id] -= koszt;
+                    V(sem_id);
+
+                    if (fork() == 0) {
+                        for (int k=0; k<ilosc; k++) {
+                            sleep(czas);
+                            P(sem_id);
+                            stan->armia[id][typ]++;
+                            V(sem_id);
+                        }
+                        exit(0);
+                    }
+                } else {
+                    V(sem_id);
+                }
+                break;
+            }
+
+            case MSG_ATAK: {
+                int atakujace[4];
+                memcpy(atakujace, msg.dane, sizeof(int)*4);
+                int wrog = (id + 1) % 2;
+
+                P(sem_id);
+                int ma_wojsko = 1;
+                for(int i=0; i<3; i++) {
+                    if (stan->armia[id][i] < atakujace[i]) ma_wojsko = 0;
+                }
+
+                if (ma_wojsko) {
+                    for(int i=0; i<3; i++) stan->armia[id][i] -= atakujace[i];
+                    
+                    V(sem_id);
+
+                    if (fork() == 0) {
+                        sleep(5);
+
+                        P(sem_id);
+                        int armia_obroncy[4];
+                        for(int i=0; i<4; i++) armia_obroncy[i] = stan->armia[wrog][i];
+
+                        float SA = oblicz_sile(atakujace, 1);
+                        float SB = oblicz_sile(armia_obroncy, 0);
+
+                        if (SA > SB) {
+                            stan->punkty[id]++;
+                            for(int i=0; i<4; i++) stan->armia[wrog][i] = 0;
+                        } else {
+                            float ratio = (SB > 0) ? (SA / SB) : 0;
+                            for(int i=0; i<4; i++) {
+                                int straty = floor(stan->armia[wrog][i] * ratio);
+                                stan->armia[wrog][i] -= straty;
+                                if (stan->armia[wrog][i] < 0) stan->armia[wrog][i] = 0;
+                            }
+                        }
+
+                        float SB_atak = oblicz_sile(armia_obroncy, 1);
+                        float SA_obrona = oblicz_sile(atakujace, 0);
+
+                        if (SB_atak > SA_obrona) {
+                            for(int i=0; i<4; i++) atakujace[i] = 0;
+                        } else {
+                            float ratio = (SA_obrona > 0) ? (SB_atak / SA_obrona) : 0;
+                            for(int i=0; i<3; i++) {
+                                int straty = floor(atakujace[i] * ratio);
+                                atakujace[i] -= straty;
+                                if (atakujace[i] < 0) atakujace[i] = 0;
+                            }
+                        }
+
+                        for(int i=0; i<3; i++) stan->armia[id][i] += atakujace[i];
+
+                        V(sem_id);
+                        exit(0);
+                    }
+                } else {
+                    V(sem_id);
+                }
+                break;
             }
         }
     }

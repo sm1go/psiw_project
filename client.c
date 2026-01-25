@@ -1,102 +1,84 @@
 #include "common.h"
 
 int msg_id;
-int my_id;
+int moje_id;
 
-void clear_screen() {
-    printf("\033[1;1H\033[2J");
+void czyszczenie(int sig) {
+    exit(0);
 }
 
-void print_dashboard(GameMsg *state) {
-    clear_screen();
-    printf("==========================================\n");
-    printf("     GRA STRATEGICZNA - GRACZ %d\n", my_id + 1);
-    printf("==========================================\n");
-    printf(" ZLOTO: \033[1;33m%d\033[0m  |  PUNKTY: %d (Wrog: %d)\n",
-           state->gold_now, state->score_me, state->score_enemy);
-    printf("------------------------------------------\n");
-    printf(" TWOJA ARMIA:\n");
-    printf(" [0] Lekka Piechota: %d\n", state->units_now[LIGHT]);
-    printf(" [1] Ciezka Piechota:%d\n", state->units_now[HEAVY]);
-    printf(" [2] Jazda:          %d\n", state->units_now[CAVALRY]);
-    printf(" [3] Robotnicy:      %d\n", state->units_now[WORKER]);
-    printf("==========================================\n");
-    printf(" KOMENDY:\n");
-    printf(" b [typ] [ilosc]  -> Buduj (np. b 0 5)\n");
-    printf(" a [L] [C] [J]    -> Atakuj (np. a 5 2 1)\n");
-    printf(" q                -> Wyjdz\n");
-    printf("==========================================\n");
-    printf(" Ostatni raport: \033[1;31m%s\033[0m\n", state->text);
-    printf("> ");
-    fflush(stdout);
-}
+int main() {
+    signal(SIGINT, czyszczenie);
+    key_t klucz = KLUCZ;
+    msg_id = msgget(klucz, 0600);
+    if (msg_id == -1) { printf("Brak serwera!\n"); return 1; }
 
-void receiver_thread() {
-    GameMsg msg;
-    char last_report[MAX_TEXT] = "Brak";
+    Komunikat msg;
+    msg.mtype = 10;
+    msg.akcja = MSG_LOGIN;
+    msg.dane[0] = getpid();
+    msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
 
-    while(1) {
-        if (msgrcv(msg_id, &msg, sizeof(GameMsg)-sizeof(long), -(20 + my_id), 0) != -1) {
-
-            if (msg.mtype == 10 + my_id) {
-                strcpy(msg.text, last_report);
-                print_dashboard(&msg);
-            }
-            else if (msg.mtype == 20 + my_id) {
-                strcpy(last_report, msg.text);
-            }
-        }
-    }
-}
-
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("Uzycie: ./client [1 lub 2]\n");
-        return 1;
-    }
-    my_id = atoi(argv[1]) - 1;
-
-    key_t key = ftok(".", PROJECT_ID);
-    msg_id = msgget(key, 0666);
-    if (msg_id == -1) {
-        printf("Serwer nie dziala!\n");
-        return 1;
-    }
-
-    GameMsg login;
-    login.mtype = 1;
-    login.source_id = my_id;
-    login.cmd_type = MSG_LOGIN;
-    login.count = getpid();
-    msgsnd(msg_id, &login, sizeof(GameMsg)-sizeof(long), 0);
+    msgrcv(msg_id, &msg, sizeof(msg)-sizeof(long), getpid(), 0);
+    if (msg.wartosc == 0) { printf("Serwer pełny!\n"); return 0; }
+    
+    moje_id = msg.id_nadawcy;
+    printf("Zalogowano jako gracz %d. Start gry...\n", moje_id);
 
     if (fork() == 0) {
-        receiver_thread();
-        exit(0);
+        while(1) {
+            msg.mtype = 10;
+            msg.akcja = MSG_STAN;
+            msg.id_nadawcy = moje_id;
+            msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
+
+            msgrcv(msg_id, &msg, sizeof(msg)-sizeof(long), moje_id + 20, 0);
+
+            system("clear");
+            printf("=== GRACZ %d ===\n", moje_id);
+            if (msg.akcja == 1) { printf("\n!!! ZWYCIESTWO !!!\n"); kill(getppid(), SIGKILL); exit(0); }
+            if (msg.akcja == 2) { printf("\n!!! PRZEGRANA !!!\n"); kill(getppid(), SIGKILL); exit(0); }
+
+            printf("Złoto: %d\n", msg.wartosc);
+            printf("Armia: [Lekka: %d] [Ciezka: %d] [Jazda: %d] [Robotnicy: %d]\n",
+                   msg.dane[0], msg.dane[1], msg.dane[2], msg.dane[3]);
+            printf("------------------------------------------------\n");
+            printf("ROZKAZY: 1. Buduj  2. Atak\n");
+            printf("> ");
+            fflush(stdout);
+
+            sleep(1);
+        }
+    } else {
+        int opcja;
+        while(1) {
+            scanf("%d", &opcja);
+            if (opcja == 1) {
+                int typ, ilosc;
+                printf("Typ (0-Lekka, 1-Ciezka, 2-Jazda, 3-Rob): ");
+                scanf("%d", &typ);
+                printf("Ilosc: ");
+                scanf("%d", &ilosc);
+                
+                msg.mtype = 10;
+                msg.akcja = MSG_BUDUJ;
+                msg.id_nadawcy = moje_id;
+                msg.dane[0] = typ;
+                msg.dane[1] = ilosc;
+                msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
+            }
+            else if (opcja == 2) {
+                int l, c, j;
+                printf("Ilosc wojsk do ataku (Lekka Ciezka Jazda): ");
+                scanf("%d %d %d", &l, &c, &j);
+
+                msg.mtype = 10;
+                msg.akcja = MSG_ATAK;
+                msg.id_nadawcy = moje_id;
+                msg.dane[0] = l; msg.dane[1] = c; msg.dane[2] = j; msg.dane[3] = 0;
+                msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
+            }
+        }
     }
-
-    char cmd_char;
-    while(1) {
-        scanf(" %c", &cmd_char);
-
-        GameMsg order;
-        order.mtype = 1;
-        order.source_id = my_id;
-
-        if (cmd_char == 'b') {
-            order.cmd_type = MSG_BUILD;
-            scanf("%d %d", &order.unit_type, &order.count);
-            msgsnd(msg_id, &order, sizeof(GameMsg)-sizeof(long), 0);
-        }
-        else if (cmd_char == 'a') {
-            order.cmd_type = MSG_ATTACK;
-            scanf("%d %d %d", &order.attack_army[0], &order.attack_army[1], &order.attack_army[2]);
-            order.attack_army[3] = 0;
-            msgsnd(msg_id, &order, sizeof(GameMsg)-sizeof(long), 0);
-        }
-        else if (cmd_char == 'q') {
-            kill(0, SIGKILL);
-            exit(0);
-        }
-    }
+    return 0;
 }
