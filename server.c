@@ -23,7 +23,7 @@ void build(int player_id, int unit_type, int count){
 
 
 
-void battle(){
+void battle_result(){
     //symulacja walki, logika walki
 }
 
