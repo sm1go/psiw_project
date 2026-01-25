@@ -1,11 +1,11 @@
 #include "common.h"
 
+int msg_id;
+int my_id;
 
-
-void clear_screen(){
-
+void clear_screen() {
+    printf("\033[1;1H\033[2J");
 }
-
 
 void print_dashboard(GameMsg *state) {
     clear_screen();
@@ -29,13 +29,73 @@ void print_dashboard(GameMsg *state) {
     printf(" Ostatni raport: \033[1;31m%s\033[0m\n", state->text);
     printf("> ");
     fflush(stdout);
-
-
-void receiver(){ //sluchanie z serwera
-
 }
 
+void receiver_thread() {
+    GameMsg msg;
+    char last_report[MAX_TEXT] = "Brak";
 
-int main(){
-    // logowanie, petla do wejscia, ataki z wyslaniem do serwera, okreslenie jednostek 
+    while(1) {
+        if (msgrcv(msg_id, &msg, sizeof(GameMsg)-sizeof(long), -(20 + my_id), 0) != -1) {
+            if (msg.mtype == 10 + my_id) {
+                strcpy(msg.text, last_report);
+                print_dashboard(&msg);
+            }
+            else if (msg.mtype == 20 + my_id) {
+                strcpy(last_report, msg.text);
+            }
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Użycie: ./client [1 lub 2]\n");
+        return 1;
+    }
+    my_id = atoi(argv[1]) - 1;
+
+    key_t key = ftok(".", PROJECT_ID);
+    msg_id = msgget(key, 0666);
+    if (msg_id == -1) {
+        printf("Serwer nie działa!\n");
+        return 1;
+    }
+
+    GameMsg login;
+    login.mtype = 1; 
+    login.source_id = my_id;
+    login.cmd_type = MSG_LOGIN;
+    login.count = getpid();
+    msgsnd(msg_id, &login, sizeof(GameMsg)-sizeof(long), 0);
+
+    if (fork() == 0) {
+        receiver_thread();
+        exit(0);
+    }
+
+    char cmd_char;
+    while(1) {
+        scanf(" %c", &cmd_char);
+        
+        GameMsg order;
+        order.mtype = 1;
+        order.source_id = my_id;
+        
+        if (cmd_char == 'b') {
+            order.cmd_type = MSG_BUILD;
+            scanf("%d %d", &order.unit_type, &order.count);
+            msgsnd(msg_id, &order, sizeof(GameMsg)-sizeof(long), 0);
+        }
+        else if (cmd_char == 'a') {
+            order.cmd_type = MSG_ATTACK;
+            scanf("%d %d %d", &order.attack_army[0], &order.attack_army[1], &order.attack_army[2]);
+            order.attack_army[3] = 0; 
+            msgsnd(msg_id, &order, sizeof(GameMsg)-sizeof(long), 0);
+        }
+        else if (cmd_char == 'q') {
+            kill(0, SIGKILL); 
+            exit(0);
+        }
+    }
 }
