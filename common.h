@@ -16,10 +16,16 @@
 
 #define PROJECT_ID 'Z'
 #define MAX_TEXT 512
+
 #define LIGHT 0
 #define HEAVY 1
 #define CAVALRY 2
 #define WORKER 3
+
+static const int COST[] = {100, 250, 550, 150};
+static const double ATTACK_VAL[] = {1.0, 1.5, 3.5, 0.0};
+static const double DEFENSE_VAL[] = {1.2, 3.0, 1.2, 0.0};
+static const int TIME_VAL[] = {2, 3, 5, 2};
 
 #define MSG_LOGIN 1
 #define MSG_BUILD 2
@@ -27,33 +33,30 @@
 #define MSG_UPDATE 10
 #define MSG_RESULT 11
 
-const int UNIT_COST[] = {100, 250, 550, 150};
-const double ATTACK_VALUE[] = {1.0, 1.5,3.5,0.0};
-const double DEFENCE_VALUE[] = {1.2, 3.0, 1.2,0.0};
-const int PRODUCTION_TIME[] = {2,3,5,2};
-
 typedef struct {
     int pid;
     int is_active;
-    int gold;
+    double gold;
     int units[4];
     int score;
 } Player;
 
-typedef struct{
+typedef struct {
     Player players[2];
 } GameState;
-
 
 typedef struct {
     long mtype;
     int source_id;
+    int cmd_type;
+    int unit_type;
+    int count;
     int attack_army[4];
     int gold_now;
     int units_now[4];
     int score_me;
     int score_enemy;
-    char text[MAX_TEXT];  
+    char text[MAX_TEXT];
 } GameMsg;
 
 union semun {
@@ -61,6 +64,5 @@ union semun {
     struct semid_ds *buf;
     unsigned short *array;
 };
-
 
 #endif
