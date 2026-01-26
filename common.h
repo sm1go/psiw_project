@@ -47,6 +47,7 @@ typedef struct {
     int akcja;
     int dane[4];
     int wartosc;
+    int punkty;
 } Komunikat;
 
 typedef struct {
