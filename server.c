@@ -47,6 +47,20 @@ void process_production(struct PlayerState *p) {
     p->resources += 50 + (workers * 5);
 }
 
+// Funkcja pomocnicza do ukrywania danych wroga
+void mask_enemy_state(struct PlayerState *dest, struct PlayerState *src) {
+    dest->id = src->id;
+    dest->victory_points = src->victory_points; // To zostawiamy jawne
+    
+    // Ukrywamy reszte
+    dest->resources = 0;
+    for(int i=0; i<4; i++) {
+        dest->units[i] = 0; 
+        dest->production_queue[i] = 0;
+        dest->production_timer[i] = 0;
+    }
+}
+
 void timer_handler(int sig) {
     sem_lock(semid);
     
@@ -54,18 +68,20 @@ void timer_handler(int sig) {
     process_production(&game->p2);
 
     struct UpdateMsg msg1, msg2;
+    
+    // Przygotowanie wiadomosci dla Gracza 1
     msg1.mtype = 10; 
     msg1.self = game->p1;
-    msg1.enemy = game->p2; 
-    msg1.enemy.resources = 0; 
+    mask_enemy_state(&msg1.enemy, &game->p2); // Ukryj dane gracza 2
     for(int i=0; i<100; i++) msg1.message[i] = game->last_event_msg[i];
     
+    // Przygotowanie wiadomosci dla Gracza 2
     msg2.mtype = 20;
     msg2.self = game->p2;
-    msg2.enemy = game->p1;
-    msg2.enemy.resources = 0;
+    mask_enemy_state(&msg2.enemy, &game->p1); // Ukryj dane gracza 1
     for(int i=0; i<100; i++) msg2.message[i] = game->last_event_msg[i];
 
+    // Czyszczenie wiadomosci po wyslaniu
     if(my_strlen(game->last_event_msg) > 0) {
         game->last_event_msg[0] = '\0';
     }
@@ -96,7 +112,7 @@ void handle_attack(int attacker_id, int u0, int u1, int u2) {
         att->victory_points++;
         for(int i=0; i<4; i++) def->units[i] = 0;
         
-        char *msg = (attacker_id == 1) ? "Gracz 1 wygral bitwe!" : "Gracz 2 wygral bitwe!";
+        char *msg = (attacker_id == 1) ? "Bitwa: Gracz 1 wygral!" : "Bitwa: Gracz 2 wygral!";
         int k=0; while(msg[k]) { game->last_event_msg[k] = msg[k]; k++; } game->last_event_msg[k] = 0;
 
     } else {
@@ -107,7 +123,7 @@ void handle_attack(int attacker_id, int u0, int u1, int u2) {
                 if(def->units[i] < 0) def->units[i] = 0;
             }
         }
-        char *msg = "Atak odparty!";
+        char *msg = "Bitwa: Atak odparty!";
         int k=0; while(msg[k]) { game->last_event_msg[k] = msg[k]; k++; } game->last_event_msg[k] = 0;
     }
 

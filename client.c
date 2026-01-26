@@ -3,35 +3,50 @@
 int msgid;
 int player_id;
 
+// Funkcja wyswietlajaca uzywa sekwencji ANSI:
+// \033[s - zapisz pozycje kursora (tam gdzie uzytkownik pisze)
+// \033[H - przesun kursor na gore ekranu
+// \033[K - wyczysc linie (zeby usunac stare smieci jesli nowa linia jest krotsza)
+// \033[u - przywroc kursor na dol
 void display_state(struct UpdateMsg *msg) {
-    write(1, "\033[2J\033[H", 7); 
-    my_print("=== GRA STRATEGICZNA ===\n");
-    my_print("Gracz: "); my_print_int(player_id); my_print("\n");
-    my_print("Zasoby: "); my_print_int(msg->self.resources); my_print("\n");
-    my_print("Punkty Zwyciestwa: "); my_print_int(msg->self.victory_points); my_print(" / 5\n");
-    my_print("------------------------\n");
-    my_print("TWOJE JEDNOSTKI:\n");
+    my_print("\033[s\033[H"); // Save cursor & Move Home
+
+    my_print("=== GRA STRATEGICZNA ===\033[K\n");
+    my_print("Gracz: "); my_print_int(player_id); my_print("\033[K\n");
+    my_print("Zasoby: "); my_print_int(msg->self.resources); my_print("\033[K\n");
+    my_print("Punkty Zwyciestwa: "); my_print_int(msg->self.victory_points); my_print(" / 5\033[K\n");
+    my_print("------------------------\033[K\n");
+    my_print("TWOJE JEDNOSTKI:\033[K\n");
+    
     my_print("0. Lekka P. : "); my_print_int(msg->self.units[0]); 
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[0]); my_print(")\n");
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[0]); my_print(")\033[K\n");
+    
     my_print("1. Ciezka P.: "); my_print_int(msg->self.units[1]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[1]); my_print(")\n");
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[1]); my_print(")\033[K\n");
+    
     my_print("2. Jazda    : "); my_print_int(msg->self.units[2]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[2]); my_print(")\n");
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[2]); my_print(")\033[K\n");
+    
     my_print("3. Robotnicy: "); my_print_int(msg->self.units[3]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[3]); my_print(")\n");
-    my_print("------------------------\n");
-    my_print("PRZECIWNIK:\n");
-    my_print("Lekka: "); my_print_int(msg->enemy.units[0]); my_print(" | ");
-    my_print("Ciezka: "); my_print_int(msg->enemy.units[1]); my_print(" | ");
-    my_print("Jazda: "); my_print_int(msg->enemy.units[2]); my_print("\n");
-    my_print("Punkty Wroga: "); my_print_int(msg->enemy.victory_points); my_print("\n");
-    my_print("------------------------\n");
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[3]); my_print(")\033[K\n");
+    
+    my_print("------------------------\033[K\n");
+    my_print("PRZECIWNIK:\033[K\n");
+    // Tutaj nie wyswietlamy juz jednostek wroga
+    my_print("Punkty Wroga: "); my_print_int(msg->enemy.victory_points); my_print("\033[K\n");
+    my_print("------------------------\033[K\n");
+    
     if(my_strlen(msg->message) > 0) {
-        my_print("KOMUNIKAT: "); my_print(msg->message); my_print("\n");
+        my_print("KOMUNIKAT: "); my_print(msg->message); my_print("\033[K\n");
+    } else {
+        my_print("\033[K\n"); // Pusta linia, czyszczenie starego komunikatu
     }
-    my_print("------------------------\n");
-    my_print("KOMENDY: [t typ ilosc] (trenuj), [a u0 u1 u2] (atak)\n");
-    my_print("> ");
+    
+    my_print("------------------------\033[K\n");
+    my_print("KOMENDY: [t typ ilosc] (trenuj), [a u0 u1 u2] (atak)\033[K\n");
+    // Nie piszemy promptu ">" tutaj, bo jest on na dole ekranu
+
+    my_print("\033[u"); // Restore cursor
 }
 
 void receiver_process() {
@@ -55,6 +70,11 @@ int main(int argc, char *argv[]) {
     player_id = my_atoi(argv[1]);
     msgid = msgget(KEY_MSG, 0666);
     
+    // Inicjalizacja ekranu - wyczyszczenie i zrobienie miejsca
+    my_print("\033[2J\033[H");
+    for(int i=0; i<16; i++) my_print("\n"); // Zrob miejsce na interfejs
+    my_print("> "); // Prompt na dole
+
     struct MsgBuf login;
     login.mtype = MSG_TYPE_LOGIN;
     login.player_id = player_id;
@@ -97,6 +117,8 @@ int main(int argc, char *argv[]) {
                     req.units_to_attack[2] = my_atoi(u2);
                     msgsnd(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0);
                 }
+                // Po wpisaniu komendy wypisz znowu prompt, zeby bylo ladnie
+                my_print("> ");
             }
         }
     }
