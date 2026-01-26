@@ -1,177 +1,102 @@
 #include "common.h"
 
-// Definicje kolorów ANSI dla lepszego wyglądu
-#define C_RESET   "\033[0m"
-#define C_BOLD    "\033[1m"
-#define C_RED     "\033[31m"
-#define C_GREEN   "\033[32m"
-#define C_YELLOW  "\033[33m"
-#define C_BLUE    "\033[34m"
-#define C_CYAN    "\033[36m"
-#define C_BG_BLUE "\033[44m"
+int msgid;
+int player_id;
 
-int msg_id;
-int moje_id;
-pid_t pid_dziecka; 
-
-void czyszczenie(int sig) {
-    if (pid_dziecka > 0) kill(pid_dziecka, SIGKILL);
-    printf("\033[?25h"); // Pokaż kursor
-    printf(C_RESET);     // Zresetuj kolory
-    exit(0);
+void display_state(struct UpdateMsg *msg) {
+    write(1, "\033[2J\033[H", 7); 
+    my_print("=== GRA STRATEGICZNA ===\n");
+    my_print("Gracz: "); my_print_int(player_id); my_print("\n");
+    my_print("Zasoby: "); my_print_int(msg->self.resources); my_print("\n");
+    my_print("Punkty Zwyciestwa: "); my_print_int(msg->self.victory_points); my_print(" / 5\n");
+    my_print("------------------------\n");
+    my_print("TWOJE JEDNOSTKI:\n");
+    my_print("0. Lekka P. : "); my_print_int(msg->self.units[0]); 
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[0]); my_print(")\n");
+    my_print("1. Ciezka P.: "); my_print_int(msg->self.units[1]);
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[1]); my_print(")\n");
+    my_print("2. Jazda    : "); my_print_int(msg->self.units[2]);
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[2]); my_print(")\n");
+    my_print("3. Robotnicy: "); my_print_int(msg->self.units[3]);
+    my_print(" (W prod: "); my_print_int(msg->self.production_queue[3]); my_print(")\n");
+    my_print("------------------------\n");
+    my_print("PRZECIWNIK:\n");
+    my_print("Lekka: "); my_print_int(msg->enemy.units[0]); my_print(" | ");
+    my_print("Ciezka: "); my_print_int(msg->enemy.units[1]); my_print(" | ");
+    my_print("Jazda: "); my_print_int(msg->enemy.units[2]); my_print("\n");
+    my_print("Punkty Wroga: "); my_print_int(msg->enemy.victory_points); my_print("\n");
+    my_print("------------------------\n");
+    if(my_strlen(msg->message) > 0) {
+        my_print("KOMUNIKAT: "); my_print(msg->message); my_print("\n");
+    }
+    my_print("------------------------\n");
+    my_print("KOMENDY: [t typ ilosc] (trenuj), [a u0 u1 u2] (atak)\n");
+    my_print("> ");
 }
 
-// Funkcja aktualizująca TYLKO górną część ekranu (Dashboard)
-void aktualizuj_statystyki(Komunikat *msg) {
-    // \033[s - Zapisz pozycję kursora
-    // \033[?25l - Ukryj kursor
-    printf("\033[s\033[?25l");
-
-    // Linia 1: Nagłówek
-    printf("\033[1;1H" C_BG_BLUE C_BOLD "  >>> CENTRUM DOWODZENIA GRACZA %d <<<  " C_RESET "\033[K", moje_id);
-    
-    // Linia 2: Status i Punkty
-    printf("\033[2;1H" C_BOLD "  STATUS: " C_RESET);
-    if (msg->akcja == 1) printf(C_GREEN "ZWYCIESTWO! " C_RESET);
-    else if (msg->akcja == 2) printf(C_RED "PRZEGRANA!  " C_RESET);
-    else printf("W TOKU      " C_RESET);
-    
-    printf(" | " C_CYAN "PUNKTY ZWYCIESTWA: %d / 5" C_RESET "\033[K", msg->punkty);
-
-    // Linia 3: Separator
-    printf("\033[3;1H------------------------------------------\033[K");
-
-    // Linia 4: Zasoby
-    printf("\033[4;1H  " C_YELLOW C_BOLD "$$$ ZLOTO: %-6d" C_RESET "\033[K", msg->wartosc);
-
-    // Linia 5: Nagłówek Armii
-    printf("\033[5;1H  " C_CYAN "ARMIA STACJONUJACA W BAZIE:" C_RESET "\033[K");
-
-    // Linia 6: Tabela Armii (Wiersz 1)
-    printf("\033[6;1H  [0] Lekka Piechota:  %4d  |  [2] Jazda:     %4d\033[K", 
-           msg->dane[0], msg->dane[2]);
-
-    // Linia 7: Tabela Armii (Wiersz 2)
-    printf("\033[7;1H  [1] Ciezka Piechota: %4d  |  [3] Robotnicy: %4d\033[K", 
-           msg->dane[1], msg->dane[3]);
-
-    // Linia 8: Separator końcowy
-    printf("\033[8;1H------------------------------------------\033[K");
-
-    // \033[u - Przywróć kursor na dół
-    // \033[?25h - Pokaż kursor
-    printf("\033[u\033[?25h");
-    fflush(stdout);
-}
-
-void rysuj_menu_glowne() {
-    system("clear");
-    // Rezerwujemy 8 linii na dashboard
-    printf("\n\n\n\n\n\n\n\n\n"); 
-    
-    printf(C_BOLD " DOSTEPNE ROZKAZY:" C_RESET "\n");
-    printf(" " C_GREEN "[1]" C_RESET " Buduj jednostki\n");
-    printf(" " C_RED   "[2]" C_RESET " Atakuj wroga\n");
-    printf("------------------------------------------\n");
-    printf(C_BOLD " Twoj wybor > " C_RESET); 
-    fflush(stdout);
-}
-
-int main() {
-    setbuf(stdout, NULL);
-    signal(SIGINT, czyszczenie);
-    
-    key_t klucz = KLUCZ;
-    msg_id = msgget(klucz, 0600);
-    if (msg_id == -1) { printf("Brak serwera! Uruchom ./serwer\n"); return 1; }
-
-    Komunikat msg;
-    msg.mtype = 10;
-    msg.akcja = MSG_LOGIN;
-    msg.dane[0] = getpid();
-    msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
-
-    msgrcv(msg_id, &msg, sizeof(msg)-sizeof(long), getpid(), 0);
-    if (msg.wartosc == 0) { printf("Serwer pelny!\n"); return 0; }
-    
-    moje_id = msg.id_nadawcy;
-    
-    rysuj_menu_glowne();
-
-    pid_dziecka = fork();
-
-    if (pid_dziecka == 0) {
-        // --- PROCES DZIECKO (Odświeżanie) ---
-        while(1) {
-            msg.mtype = 10;
-            msg.akcja = MSG_STAN;
-            msg.id_nadawcy = moje_id;
-            msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
-
-            if (msgrcv(msg_id, &msg, sizeof(msg)-sizeof(long), moje_id + 20, 0) != -1) {
-                if (msg.akcja == 1 || msg.akcja == 2) {
-                    kill(getppid(), SIGKILL);
-                    system("clear");
-                    printf("\n\n");
-                    if(msg.akcja == 1) 
-                        printf(C_GREEN C_BOLD "\n\t   !!! GRATULACJE !!!\n\t   !!! ZWYCIESTWO !!!   \n\n" C_RESET);
-                    else 
-                        printf(C_RED C_BOLD "\n\t   !!! BAZA ZNISZCZONA !!!\n\t   !!! PRZEGRANA !!!   \n\n" C_RESET);
-                    exit(0);
-                }
-                
-                aktualizuj_statystyki(&msg);
+void receiver_process() {
+    struct UpdateMsg msg;
+    long type = (player_id == 1) ? 10 : 20;
+    while(1) {
+        if(msgrcv(msgid, &msg, sizeof(struct UpdateMsg) - sizeof(long), type, 0) != -1) {
+            display_state(&msg);
+            if(my_strlen(msg.message) >= 6 && msg.message[0] == 'K' && msg.message[1] == 'O') {
+                exit(0);
             }
-            usleep(500000); 
         }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if(argc < 2) {
+        my_print("Uzycie: ./client [1 lub 2]\n");
+        return 1;
+    }
+    player_id = my_atoi(argv[1]);
+    msgid = msgget(KEY_MSG, 0666);
+    
+    struct MsgBuf login;
+    login.mtype = MSG_TYPE_LOGIN;
+    login.player_id = player_id;
+    msgsnd(msgid, &login, sizeof(struct MsgBuf) - sizeof(long), 0);
+
+    if(fork() == 0) {
+        receiver_process();
     } else {
-        // --- PROCES RODZIC (Sterowanie) ---
-        int opcja;
+        char buf[50];
         while(1) {
-            if (scanf("%d", &opcja) != 1) {
-                while(getchar() != '\n'); 
-                continue;
-            }
+            int n = read(0, buf, 50);
+            if(n > 0) {
+                buf[n] = '\0';
+                struct MsgBuf req;
+                req.mtype = player_id; 
+                req.player_id = player_id;
 
-            if (opcja == 1 || opcja == 2) {
-                kill(pid_dziecka, SIGSTOP); 
-
-                // Czyścimy obszar pod menu (od linii 14 w dół)
-                printf("\033[14;1H\033[J"); 
-
-                if (opcja == 1) {
-                    int typ, ilosc;
-                    printf(C_GREEN " [BUDOWA]" C_RESET " Wybierz typ:\n");
-                    printf(" 0-Lekka(100)  1-Ciezka(250)\n 2-Jazda(550)  3-Robotnik(150)\n > ");
-                    scanf("%d", &typ);
-                    printf(" Ilosc: ");
-                    scanf("%d", &ilosc);
+                if(buf[0] == 't') {
+                    req.command = 1;
+                    req.unit_type = buf[2] - '0';
+                    char num_buf[10];
+                    int k=0;
+                    for(int i=4; i<n && buf[i]>='0' && buf[i]<='9'; i++) {
+                        num_buf[k++] = buf[i];
+                    }
+                    num_buf[k] = '\0';
+                    req.count = my_atoi(num_buf);
+                    msgsnd(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0);
+                }
+                else if(buf[0] == 'a') {
+                    req.command = 2;
+                    char u0[5], u1[5], u2[5];
+                    int idx = 2, k=0;
+                    while(buf[idx] != ' ' && idx < n) u0[k++] = buf[idx++]; u0[k] = '\0'; idx++; k=0;
+                    while(buf[idx] != ' ' && idx < n) u1[k++] = buf[idx++]; u1[k] = '\0'; idx++; k=0;
+                    while(buf[idx] != ' ' && buf[idx] != '\n' && idx < n) u2[k++] = buf[idx++]; u2[k] = '\0';
                     
-                    msg.mtype = 10;
-                    msg.akcja = MSG_BUDUJ;
-                    msg.id_nadawcy = moje_id;
-                    msg.dane[0] = typ;
-                    msg.dane[1] = ilosc;
-                    msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
-                    printf(C_YELLOW " -> Rozkaz przyjeto." C_RESET);
+                    req.units_to_attack[0] = my_atoi(u0);
+                    req.units_to_attack[1] = my_atoi(u1);
+                    req.units_to_attack[2] = my_atoi(u2);
+                    msgsnd(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0);
                 }
-                else if (opcja == 2) {
-                    int l, c, j;
-                    printf(C_RED " [ATAK]" C_RESET " Podaj liczebnosc wojsk:\n");
-                    printf(" Lekka Ciezka Jazda > ");
-                    scanf("%d %d %d", &l, &c, &j);
-
-                    msg.mtype = 10;
-                    msg.akcja = MSG_ATAK;
-                    msg.id_nadawcy = moje_id;
-                    msg.dane[0] = l; msg.dane[1] = c; msg.dane[2] = j; msg.dane[3] = 0;
-                    msgsnd(msg_id, &msg, sizeof(msg)-sizeof(long), 0);
-                    printf(C_YELLOW " -> Wojska wyslane!" C_RESET);
-                }
-                
-                sleep(1); 
-                rysuj_menu_glowne();
-                kill(pid_dziecka, SIGCONT);
             }
         }
     }
