@@ -11,25 +11,66 @@ int msg_id;
 int my_id = -1;
 pid_t my_pid;
 
+// Funkcja pomocnicza do pisania na ekran
 void my_write(const char* str) {
     write(1, str, strlen(str));
 }
 
-void draw_interface(int gold, int u1, int u2, int u3) {
+// Inicjalizacja ekranu - czysci calosc i rysuje statyczny uklad raz
+void setup_screen() {
     char buf[512];
-    sprintf(buf, "\033[H\033[J"); 
+    sprintf(buf, "\033[H\033[J"); // Wyczysc ekran
     write(1, buf, strlen(buf));
     
+    // Naglowek (Linia 1)
     sprintf(buf, "=== KLIENT GRY === (PID: %d)\n", my_pid);
     write(1, buf, strlen(buf));
-    sprintf(buf, "ZLOTO: %d | LEKKA: %d | CIEZKA: %d | JAZDA: %d\n", gold, u1, u2, u3);
+    
+    // Statystyki (Linia 2) - to bedziemy aktualizowac
+    sprintf(buf, "OCZEKIWANIE NA DANE...\n");
     write(1, buf, strlen(buf));
+    
+    // Kreska (Linia 3)
     sprintf(buf, "------------------------------------------------\n");
     write(1, buf, strlen(buf));
+    
+    // Instrukcja (Linie 4-6)
     sprintf(buf, "Komendy:\n b [typ 0-3] [ilosc] - buduj (0:Lekka, 1:Ciezka, 2:Jazda, 3:Rob)\n a [l] [c] [j] - atakuj\n");
     write(1, buf, strlen(buf));
-    sprintf(buf, "\033[10;0H> "); 
+
+    // Miejsce na komunikaty (Linia 8)
+    write(1, "\033[8;1HKOMUNIKATY: Brak\n", 22);
+
+    // Ustawienie kursora w linii zachety (Linia 10)
+    write(1, "\033[10;1H> ", 8);
+}
+
+// Funkcja aktualizujaca TYLKO linie ze statystykami
+void update_stats(int gold, int u1, int u2, int u3) {
+    char buf[256];
+    
+    // 1. Zapisz obecna pozycje kursora (tam gdzie uzytkownik pisze)
+    write(1, "\0337", 2); 
+    
+    // 2. Skocz do Linii 2 (tam sa statystyki)
+    write(1, "\033[2;1H", 6);
+    
+    // 3. Nadpisz linie i wyczysc reszte linii (\033[K) zeby nie zostaly smieci
+    sprintf(buf, "ZLOTO: %d | LEKKA: %d | CIEZKA: %d | JAZDA: %d   \033[K", gold, u1, u2, u3);
     write(1, buf, strlen(buf));
+    
+    // 4. Przywroc kursor na dol (tam gdzie uzytkownik pisal)
+    write(1, "\0338", 2);
+}
+
+// Funkcja aktualizujaca TYLKO linie komunikatow
+void update_message(char* text) {
+    char buf[300];
+    write(1, "\0337", 2); // Zapisz kursor
+    write(1, "\033[8;1H", 6); // Skok do linii 8
+    sprintf(buf, "KOMUNIKAT: %s\033[K", text);
+    write(1, buf, strlen(buf));
+    write(1, "\0338", 2); // Przywroc kursor
 }
 
 void receiver_loop() {
@@ -37,17 +78,13 @@ void receiver_loop() {
     while(1) {
         if (msgrcv(msg_id, &msg, sizeof(Message) - sizeof(long), my_pid, 0) > 0) {
             if (msg.cmd == MSG_STATE) {
-                write(1, "\0337", 2); 
-                draw_interface(msg.args[0], msg.args[1], msg.args[2], msg.args[3]);
-                write(1, "\0338", 2); 
+                update_stats(msg.args[0], msg.args[1], msg.args[2], msg.args[3]);
             } else if (msg.cmd == MSG_RESULT || msg.cmd == MSG_GAME_OVER) {
-                write(1, "\0337", 2); 
-                write(1, "\033[6;0H", 6); 
-                char buf[300];
-                sprintf(buf, "KOMUNIKAT: %s\n", msg.text);
-                write(1, buf, strlen(buf));
-                write(1, "\0338", 2); 
-                if (msg.cmd == MSG_GAME_OVER) exit(0);
+                update_message(msg.text);
+                if (msg.cmd == MSG_GAME_OVER) {
+                    kill(getppid(), SIGKILL); // Zabij proces rodzica (wejscia)
+                    exit(0);
+                }
             } else if (msg.cmd == CMD_LOGIN) {
                 my_id = msg.args[0];
             }
@@ -65,11 +102,15 @@ int main() {
         return 1;
     }
 
+    // Logowanie
     Message login;
     login.mtype = 1; 
     login.src_id = my_pid;
     login.cmd = CMD_LOGIN;
     msgsnd(msg_id, &login, sizeof(Message) - sizeof(long), 0);
+
+    // Rysujemy interfejs raz na poczatku
+    setup_screen();
 
     if (fork() == 0) {
         receiver_loop();
@@ -78,11 +119,15 @@ int main() {
 
     char input[100];
     while(1) {
+        // Czekaj na wpisanie komendy
         int n = read(0, input, 99);
         if (n > 0) {
-            input[n] = 0;
+            input[n] = 0; // Null-terminate
+            
+            // Parsowanie
             char cmd;
             int a1, a2, a3;
+            // Skanujemy bufor
             if (sscanf(input, "%c %d %d %d", &cmd, &a1, &a2, &a3) >= 1) {
                 Message ord;
                 ord.mtype = 1;
@@ -101,7 +146,11 @@ int main() {
                     msgsnd(msg_id, &ord, sizeof(Message) - sizeof(long), 0);
                 }
             }
-            write(1, "\033[10;0H\033[K> ", 11); 
+            
+            // Po wcisnieciu ENTER:
+            // 1. Wyczysc linie komend (Linia 10)
+            // 2. Wypisz zachete ponownie
+            write(1, "\033[10;1H\033[K> ", 11); 
         }
     }
 }
