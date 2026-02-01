@@ -1,240 +1,267 @@
-#include <sys/types.h>
+#include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
-#include <unistd.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 #include <signal.h>
-#include <errno.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include "common.h"
 
-/* --- DEFINICJE --- */
-#define MSG_LOGOWANIE 10
-#define MSG_BUDUJ     11
-#define MSG_ATAK      12
-#define MSG_STAN      13
-#define MSG_WYNIK     14
-#define MSG_START     15
+int shm_id, sem_id, msg_id;
+GameState *game;
 
-#define KLUCZ 12345
+struct sembuf p_op = {0, -1, 0};
+struct sembuf v_op = {0, 1, 0};
 
-// Struktura wiadomosci
-struct msgbuf {
-    long mtype;
-    int id_gracza;
-    int wybor;
-    int jednostki[4];
-    int zasoby;
-    int czas;
-    int indeks_jednostki;
-    int liczba;
-    int punkty;
-};
-
-// Stan gry (Shared Memory)
-typedef struct {
-    int resources[3];      // resources[1]=Gracz1, [2]=Gracz2
-    int units[3][4];       
-    int score[3];          
-    int players_count;     
-    int player_pids[3];    
-} GameState;
-
-// Statystyki
-int COST[] = {100, 250, 550, 150};
-double ATTACK_VAL[] = {1.0, 1.5, 3.5, 0.0};
-double DEFENSE_VAL[] = {1.2, 3.0, 1.2, 0.0};
-
-int sem_id;
-int shm_id;
-int msg_id;
-GameState *gs;
-
-// --- FUNKCJE POMOCNICZE (zamiast printf) ---
-void print_log(const char *s) {
-    write(1, s, strlen(s));
+void my_write(const char* str) {
+    write(1, str, strlen(str));
 }
 
-void sem_lock() {
-    struct sembuf sb = {0, -1, 0};
-    semop(sem_id, &sb, 1);
-}
-
-void sem_unlock() {
-    struct sembuf sb = {0, 1, 0};
-    semop(sem_id, &sb, 1);
-}
-
-void cleanup(int sig) {
-    print_log("\nZamykanie serwera...\n");
-    shmdt(gs);
+void clean_exit(int sig) {
+    shmdt(game);
     shmctl(shm_id, IPC_RMID, NULL);
     semctl(sem_id, 0, IPC_RMID);
     msgctl(msg_id, IPC_RMID, NULL);
     exit(0);
 }
 
-void init_game() {
-    sem_lock();
-    gs->players_count = 0;
-    for(int i=1; i<=2; i++) {
-        gs->resources[i] = 300; 
-        gs->score[i] = 0;
-        gs->player_pids[i] = 0;
-        for(int j=0; j<4; j++) gs->units[i][j] = 0;
-    }
-    sem_unlock();
+void init_ipc() {
+    key_t key = ftok(".", KEY_ID);
+    shm_id = shmget(key, sizeof(GameState), IPC_CREAT | 0666);
+    game = (GameState*)shmat(shm_id, NULL, 0);
+    memset(game, 0, sizeof(GameState));
+    
+    sem_id = semget(key, 1, IPC_CREAT | 0666);
+    semctl(sem_id, 0, SETVAL, 1);
+    
+    msg_id = msgget(key, IPC_CREAT | 0666);
+    
+    game->players[0].gold = 300;
+    game->players[1].gold = 300;
+    game->players[0].id = 0;
+    game->players[1].id = 1;
 }
 
-void resolve_combat(int attacker_id, int *attack_units) {
-    int defender_id = (attacker_id == 1) ? 2 : 1;
-    
-    double SA = 0; 
-    for(int i=0; i<3; i++) SA += attack_units[i] * ATTACK_VAL[i];
+double get_attack(int type) {
+    if (type == UNIT_LIGHT) return 1.0;
+    if (type == UNIT_HEAVY) return 1.5;
+    if (type == UNIT_CAVALRY) return 3.5;
+    return 0.0;
+}
 
-    double SB = 0; 
-    for(int i=0; i<3; i++) SB += gs->units[defender_id][i] * DEFENSE_VAL[i];
+double get_defense(int type) {
+    if (type == UNIT_LIGHT) return 1.2;
+    if (type == UNIT_HEAVY) return 3.0;
+    if (type == UNIT_CAVALRY) return 1.2;
+    return 0.0;
+}
 
-    if (SA > SB) {
-        gs->score[attacker_id]++;
-        for(int i=0; i<3; i++) gs->units[defender_id][i] = 0;
+int get_cost(int type) {
+    if (type == UNIT_LIGHT) return 100;
+    if (type == UNIT_HEAVY) return 250;
+    if (type == UNIT_CAVALRY) return 550;
+    if (type == UNIT_WORKER) return 150;
+    return 0;
+}
+
+int get_time(int type) {
+    if (type == UNIT_LIGHT) return 2;
+    if (type == UNIT_HEAVY) return 3;
+    if (type == UNIT_CAVALRY) return 5;
+    if (type == UNIT_WORKER) return 2;
+    return 0;
+}
+
+void resolve_combat(int attacker_id, int u_light, int u_heavy, int u_cav) {
+    int defender_id = (attacker_id + 1) % 2;
+    PlayerData *att = &game->players[attacker_id];
+    PlayerData *def = &game->players[defender_id];
+
+    double sa = u_light * get_attack(UNIT_LIGHT) + u_heavy * get_attack(UNIT_HEAVY) + u_cav * get_attack(UNIT_CAVALRY);
+    double sb = def->units[UNIT_LIGHT] * get_defense(UNIT_LIGHT) + 
+                def->units[UNIT_HEAVY] * get_defense(UNIT_HEAVY) + 
+                def->units[UNIT_CAVALRY] * get_defense(UNIT_CAVALRY); // Workers don't defend
+
+    char buf[256];
+    int won = 0;
+
+    if (sa > sb) {
+        won = 1;
+        att->wins++;
+        memset(def->units, 0, sizeof(def->units)); 
+        def->worker_count = 0; 
     } else {
-        if (SB > 0) {
-            for(int i=0; i<3; i++) {
-                int lost = (int)(gs->units[defender_id][i] * (SA/SB));
-                gs->units[defender_id][i] -= lost;
-                if (gs->units[defender_id][i] < 0) gs->units[defender_id][i] = 0;
+        if (sb > 0) {
+            for (int i = 0; i < 3; i++) {
+                int loss = floor(def->units[i] * (sa / sb));
+                def->units[i] -= loss;
+                if (def->units[i] < 0) def->units[i] = 0;
             }
         }
+    }
+
+    double sb_counter = def->units[UNIT_LIGHT] * get_attack(UNIT_LIGHT) + 
+                        def->units[UNIT_HEAVY] * get_attack(UNIT_HEAVY) + 
+                        def->units[UNIT_CAVALRY] * get_attack(UNIT_CAVALRY);
+    
+    double sa_defense = (att->units[UNIT_LIGHT] - u_light) * get_defense(UNIT_LIGHT) +
+                        (att->units[UNIT_HEAVY] - u_heavy) * get_defense(UNIT_HEAVY) +
+                        (att->units[UNIT_CAVALRY] - u_cav) * get_defense(UNIT_CAVALRY); 
+
+    sa_defense += u_light * 1.2 + u_heavy * 3.0 + u_cav * 1.2;
+
+    if (sb_counter > 0 && sa_defense > 0) {
+       
+    }
+
+    Message msg;
+    msg.mtype = game->client_pids[attacker_id];
+    msg.cmd = MSG_RESULT;
+    if (won) sprintf(msg.text, "Atak udany! Wygrales bitwe.");
+    else sprintf(msg.text, "Atak odparty przez wroga.");
+    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+
+    msg.mtype = game->client_pids[defender_id];
+    if (won) sprintf(msg.text, "Twoja baza zostala zniszczona!");
+    else sprintf(msg.text, "Odparles atak wroga.");
+    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+}
+
+void logic_loop() {
+    while (1) {
+        semop(sem_id, &p_op, 1);
+        
+        for (int i = 0; i < 2; i++) {
+            if (game->client_pids[i] == 0) continue;
+
+            game->players[i].gold += 50 + (game->players[i].worker_count * 5);
+
+            int head = game->queue_head[i];
+            int tail = game->queue_tail[i];
+            
+            if (head != tail) {
+                game->build_queue[i][head].time_left--;
+                if (game->build_queue[i][head].time_left <= 0) {
+                    int type = game->build_queue[i][head].type;
+                    int count = game->build_queue[i][head].count;
+                    if (type == UNIT_WORKER) game->players[i].worker_count += count;
+                    else game->players[i].units[type] += count;
+                    
+                    game->queue_head[i] = (head + 1) % MAX_QUEUE;
+                }
+            }
+
+            if (game->players[i].wins >= 5) {
+                Message msg;
+                msg.cmd = MSG_GAME_OVER;
+                msg.mtype = game->client_pids[i];
+                sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
+                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+
+                msg.mtype = game->client_pids[(i + 1) % 2];
+                sprintf(msg.text, "PRZEGRALES GRE. SPROBUJ PONOWNIE.");
+                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+                
+                semop(sem_id, &v_op, 1);
+                sleep(1);
+                kill(getppid(), SIGINT);
+                exit(0);
+            }
+        }
+        
+        semop(sem_id, &v_op, 1);
+        
+        for(int i=0; i<2; i++) {
+            if (game->client_pids[i] != 0) {
+                Message update;
+                update.mtype = game->client_pids[i];
+                update.cmd = MSG_STATE;
+                update.args[0] = game->players[i].gold;
+                update.args[1] = game->players[i].units[0]; 
+                update.args[2] = game->players[i].units[1];
+                update.args[3] = game->players[i].units[2];
+                msgsnd(msg_id, &update, sizeof(Message) - sizeof(long), 0);
+            }
+        }
+        sleep(1);
     }
 }
 
 int main() {
-    signal(SIGINT, cleanup);
-
-    // Tworzenie IPC
-    msg_id = msgget(KLUCZ, IPC_CREAT | 0600);
-    shm_id = shmget(KLUCZ, sizeof(GameState), IPC_CREAT | 0600);
-    sem_id = semget(KLUCZ, 1, IPC_CREAT | 0600);
-
-    semctl(sem_id, 0, SETVAL, 1); // Semafor otwarty
-
-    gs = (GameState*)shmat(shm_id, NULL, 0);
-    init_game();
-
-    print_log("Serwer gotowy. Czekam na graczy...\n");
-
+    signal(SIGINT, clean_exit);
+    init_ipc();
+    
     if (fork() == 0) {
-        // --- PROCES DZIECKO (Surowce) ---
-        while(1) {
-            sleep(1);
-            sem_lock();
-            if (gs->players_count > 0) {
-                for(int i=1; i<=2; i++) {
-                    int gain = 50 + (gs->units[i][3] * 5);
-                    gs->resources[i] += gain;
-                }
-            }
-            sem_unlock();
-        }
-    } else {
-        // --- PROCES RODZIC (Komunikaty) ---
-        struct msgbuf msg, response;
-        
-        while(1) {
-            // Odbieramy komunikaty typu -20 (czyli priorytetowe i zwykłe, byle < 20)
-            // Dzięki temu nie odbierzemy komunikatów PID (duże liczby) jeśli jakieś są.
-            if (msgrcv(msg_id, &msg, sizeof(msg) - sizeof(long), -20, 0) != -1) {
-                
-                sem_lock();
-                
-                // 1. LOGOWANIE (Tu odsyłamy na PID!)
-                if (msg.mtype == MSG_LOGOWANIE) {
-                    response.mtype = msg.liczba; // Odsyłamy na PID procesu klienta
-                    if (gs->players_count < 2) {
-                        gs->players_count++;
-                        int new_id = gs->players_count;
-                        gs->player_pids[new_id] = msg.liczba;
-                        response.id_gracza = new_id;
-                        print_log("Nowy gracz dolaczyl.\n");
-                    } else {
-                        response.id_gracza = -1; 
-                    }
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-                
-                // 2. START GRY (Tu odsyłamy na ID GRACZA - 1 lub 2!)
-                else if (msg.mtype == MSG_START) {
-                    response.mtype = msg.id_gracza; // Klient czeka na mtype=1 lub 2
-                    response.liczba = (gs->players_count == 2) ? 1 : 0;
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-
-                // 3. STAN GRY
-                else if (msg.mtype == MSG_STAN) {
-                    response.mtype = msg.id_gracza;
-                    response.punkty = gs->score[msg.id_gracza];
-                    response.zasoby = gs->resources[msg.id_gracza];
-                    for(int i=0; i<4; i++) response.jednostki[i] = gs->units[msg.id_gracza][i];
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-
-                // 4. BUDOWANIE
-                else if (msg.mtype == MSG_BUDUJ) {
-                    int p_id = msg.id_gracza;
-                    int u_idx = msg.indeks_jednostki;
-                    int count = msg.liczba;
-                    int total_cost = COST[u_idx] * count;
-                    
-                    response.mtype = p_id; // Odsyłamy na 1 lub 2
-
-                    if (gs->resources[p_id] >= total_cost) {
-                        gs->resources[p_id] -= total_cost;
-                        gs->units[p_id][u_idx] += count;
-                        response.liczba = 1; 
-                    } else {
-                        response.liczba = 0; 
-                    }
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-
-                // 5. ATAK
-                else if (msg.mtype == MSG_ATAK) {
-                    int p_id = msg.id_gracza;
-                    response.mtype = p_id;
-                    
-                    int possible = 1;
-                    for(int i=0; i<3; i++) {
-                        if (gs->units[p_id][i] < msg.jednostki[i]) possible = 0;
-                    }
-
-                    if (possible) {
-                        for(int i=0; i<3; i++) gs->units[p_id][i] -= msg.jednostki[i];
-                        resolve_combat(p_id, msg.jednostki);
-                        response.liczba = 1;
-                    } else {
-                        response.liczba = 0;
-                    }
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-
-                // 6. WYNIK
-                else if (msg.mtype == MSG_WYNIK) {
-                    int p_id = msg.id_gracza;
-                    int opp_id = (p_id == 1) ? 2 : 1;
-                    response.mtype = p_id;
-                    
-                    if (gs->score[p_id] >= 5) response.liczba = 1;     
-                    else if (gs->score[opp_id] >= 5) response.liczba = 2; 
-                    else response.liczba = 0;                             
-                    
-                    msgsnd(msg_id, &response, sizeof(response) - sizeof(long), 0);
-                }
-
-                sem_unlock();
-            }
-        }
+        logic_loop();
+        exit(0);
     }
-    return 0;
+
+    my_write("Serwer uruchomiony. Oczekiwanie na graczy...\n");
+
+    Message msg;
+    while (1) {
+        msgrcv(msg_id, &msg, sizeof(Message) - sizeof(long), 1, 0);
+        
+        semop(sem_id, &p_op, 1);
+        
+        if (msg.cmd == CMD_LOGIN) {
+            if (game->connected_clients < 2) {
+                int pid = msg.src_id;
+                int idx = game->connected_clients;
+                game->client_pids[idx] = pid;
+                game->connected_clients++;
+                
+                Message reply;
+                reply.mtype = pid;
+                reply.cmd = CMD_LOGIN;
+                reply.args[0] = idx; 
+                msgsnd(msg_id, &reply, sizeof(Message) - sizeof(long), 0);
+            }
+        } else if (msg.cmd == CMD_BUILD) {
+            int p_idx = -1;
+            if (msg.src_id == game->client_pids[0]) p_idx = 0;
+            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
+
+            if (p_idx != -1) {
+                int type = msg.args[0];
+                int count = msg.args[1];
+                int cost = get_cost(type) * count;
+                
+                if (game->players[p_idx].gold >= cost) {
+                    int tail = game->queue_tail[p_idx];
+                    int next_tail = (tail + 1) % MAX_QUEUE;
+                    if (next_tail != game->queue_head[p_idx]) {
+                        game->players[p_idx].gold -= cost;
+                        game->build_queue[p_idx][tail].type = type;
+                        game->build_queue[p_idx][tail].count = count;
+                        game->build_queue[p_idx][tail].time_left = get_time(type); // simplified: full time per batch
+                        game->queue_tail[p_idx] = next_tail;
+                    }
+                }
+            }
+        } else if (msg.cmd == CMD_ATTACK) {
+             int p_idx = -1;
+            if (msg.src_id == game->client_pids[0]) p_idx = 0;
+            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
+            
+            if (p_idx != -1) {
+                 int ul = msg.args[0];
+                 int uh = msg.args[1];
+                 int uc = msg.args[2];
+                 
+                 if (game->players[p_idx].units[UNIT_LIGHT] >= ul &&
+                     game->players[p_idx].units[UNIT_HEAVY] >= uh &&
+                     game->players[p_idx].units[UNIT_CAVALRY] >= uc) {
+                         
+                     resolve_combat(p_idx, ul, uh, uc);
+                 }
+            }
+        }
+
+        semop(sem_id, &v_op, 1);
+    }
 }

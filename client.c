@@ -1,316 +1,107 @@
-#include <sys/types.h>
+#include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
-#include <unistd.h>
-#include <signal.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <signal.h>
+#include "common.h"
 
-/* --- DEFINICJE ZGODNE Z TWOIM WZOREM --- */
-#define MSG_LOGOWANIE 10
-#define MSG_BUDUJ     11
-#define MSG_ATAK      12
-#define MSG_STAN      13
-#define MSG_WYNIK     14
-#define MSG_START     15
+int msg_id;
+int my_id = -1;
+pid_t my_pid;
 
-#define KLUCZ 12345
-
-// Struktura identyczna jak w Twoim wzorze
-struct msgbuf {
-    long mtype;
-    int id_gracza;
-    int wybor;
-    int jednostki[4];
-    int zasoby;
-    int czas;
-    int indeks_jednostki;
-    int liczba;
-    int punkty;
-};
-
-pid_t pid_dziecka = 0;
-
-/* --- FUNKCJE POMOCNICZE (zamiast printf/scanf) --- */
-
-// Wypisywanie ciągu znaków
-void print_str(const char *s) {
-    write(1, s, strlen(s));
+void my_write(const char* str) {
+    write(1, str, strlen(str));
 }
 
-// Wypisywanie liczby całkowitej
-void print_int(int n) {
-    char buf[20];
-    int i = 0;
-    if (n == 0) {
-        write(1, "0", 1);
-        return;
-    }
-    int neg = 0;
-    if (n < 0) { neg = 1; n = -n; }
-    while (n > 0) {
-        buf[i++] = (n % 10) + '0';
-        n /= 10;
-    }
-    if (neg) buf[i++] = '-';
-    for (int j = 0; j < i / 2; j++) {
-        char tmp = buf[j];
-        buf[j] = buf[i - j - 1];
-        buf[i - j - 1] = tmp;
-    }
-    write(1, buf, i);
+void draw_interface(int gold, int u1, int u2, int u3) {
+    char buf[512];
+    sprintf(buf, "\033[H\033[J"); 
+    write(1, buf, strlen(buf));
+    
+    sprintf(buf, "=== KLIENT GRY === (PID: %d)\n", my_pid);
+    write(1, buf, strlen(buf));
+    sprintf(buf, "ZLOTO: %d | LEKKA: %d | CIEZKA: %d | JAZDA: %d\n", gold, u1, u2, u3);
+    write(1, buf, strlen(buf));
+    sprintf(buf, "------------------------------------------------\n");
+    write(1, buf, strlen(buf));
+    sprintf(buf, "Komendy:\n b [typ 0-3] [ilosc] - buduj (0:Lekka, 1:Ciezka, 2:Jazda, 3:Rob)\n a [l] [c] [j] - atakuj\n");
+    write(1, buf, strlen(buf));
+    sprintf(buf, "\033[10;0H> "); 
+    write(1, buf, strlen(buf));
 }
 
-// Pobieranie liczby od użytkownika (zamiast scanf)
-int get_int() {
-    char buf[32];
-    int n = read(0, buf, 31);
-    if (n <= 0) return 0;
-    buf[n] = '\0';
-    int res = 0;
-    int start = 0;
-    // Pomin ewentualne białe znaki
-    while(buf[start] == ' ' || buf[start] == '\n') start++;
-    
-    for (int i = start; i < n; ++i) {
-        if (buf[i] >= '0' && buf[i] <= '9') {
-            res = res * 10 + (buf[i] - '0');
-        } else if (buf[i] == '\n' || buf[i] == ' ') {
-            break;
-        }
-    }
-    return res;
-}
-
-// Pobieranie trzech liczb (dla ataku: L C J)
-void get_three_ints(int *a, int *b, int *c) {
-    char buf[64];
-    int n = read(0, buf, 63);
-    if (n <= 0) { *a=0; *b=0; *c=0; return; }
-    buf[n] = '\0';
-    
-    int val = 0;
-    int counter = 0;
-    int reading_num = 0;
-    
-    for(int i=0; i<n; i++) {
-        if(buf[i] >= '0' && buf[i] <= '9') {
-            val = val * 10 + (buf[i] - '0');
-            reading_num = 1;
-        } else {
-            if(reading_num) {
-                if(counter == 0) *a = val;
-                else if(counter == 1) *b = val;
-                else if(counter == 2) *c = val;
-                val = 0;
-                counter++;
-                reading_num = 0;
+void receiver_loop() {
+    Message msg;
+    while(1) {
+        if (msgrcv(msg_id, &msg, sizeof(Message) - sizeof(long), my_pid, 0) > 0) {
+            if (msg.cmd == MSG_STATE) {
+                write(1, "\0337", 2); 
+                draw_interface(msg.args[0], msg.args[1], msg.args[2], msg.args[3]);
+                write(1, "\0338", 2); 
+            } else if (msg.cmd == MSG_RESULT || msg.cmd == MSG_GAME_OVER) {
+                write(1, "\0337", 2); 
+                write(1, "\033[6;0H", 6); 
+                char buf[300];
+                sprintf(buf, "KOMUNIKAT: %s\n", msg.text);
+                write(1, buf, strlen(buf));
+                write(1, "\0338", 2); 
+                if (msg.cmd == MSG_GAME_OVER) exit(0);
+            } else if (msg.cmd == CMD_LOGIN) {
+                my_id = msg.args[0];
             }
         }
     }
-    // Jeśli ciąg kończy się liczbą bez spacji
-    if(reading_num) {
-        if(counter == 0) *a = val;
-        else if(counter == 1) *b = val;
-        else if(counter == 2) *c = val;
-    }
 }
-
-// Czyszczenie ekranu kodami ANSI (zamiast system("clear"))
-void clear_screen() {
-    write(1, "\033[H\033[J", 7);
-}
-
-/* --- OBSŁUGA SYGNAŁÓW --- */
-
-void czyszczenie(int sig) {
-    if (pid_dziecka > 0) kill(pid_dziecka, SIGKILL);
-    exit(0);
-}
-
-/* --- MAIN --- */
 
 int main() {
-    signal(SIGINT, czyszczenie);
+    my_pid = getpid();
+    key_t key = ftok(".", KEY_ID);
+    msg_id = msgget(key, 0666);
     
-    int msg = msgget(KLUCZ, 0600);
-    if (msg == -1) { 
-        print_str("Brak polaczenia z serwerem (uruchom serwer).\n"); 
-        return 1; 
+    if (msg_id == -1) {
+        my_write("Brak kolejki komunikatow. Uruchom serwer.\n");
+        return 1;
     }
 
-    pid_t pid = getpid();
-    struct msgbuf komunikat;
-    
-    // --- LOGOWANIE ---
-    komunikat.liczba = pid;
-    komunikat.wybor = MSG_LOGOWANIE;
-    komunikat.mtype = MSG_LOGOWANIE;
-    
-    msgsnd(msg, &komunikat, sizeof(komunikat) - sizeof(long), 0);
-    msgrcv(msg, &komunikat, sizeof(komunikat) - sizeof(long), pid, 0);
-    
-    int id = komunikat.id_gracza;
-    if (id == -1) {
-        print_str("Serwer pelny! Zamykanie.\n");
-        return 0;
-    }
-    
-    print_str("Zalogowano! Twoje ID to: ");
-    print_int(id);
-    print_str("\n");
+    Message login;
+    login.mtype = 1; 
+    login.src_id = my_pid;
+    login.cmd = CMD_LOGIN;
+    msgsnd(msg_id, &login, sizeof(Message) - sizeof(long), 0);
 
-    // --- OCZEKIWANIE NA GRACZA ---
-    print_str("Oczekiwanie na drugiego gracza...\n");
+    if (fork() == 0) {
+        receiver_loop();
+        exit(0);
+    }
+
+    char input[100];
     while(1) {
-        komunikat.mtype = MSG_START;
-        komunikat.wybor = MSG_START;
-        komunikat.id_gracza = id;
-        
-        msgsnd(msg, &komunikat, sizeof(komunikat) - sizeof(long), 0);
-        // Odbiór
-        msgrcv(msg, &komunikat, sizeof(komunikat) - sizeof(long), id, 0);
-        
-        if (komunikat.liczba == 1) {
-            print_str("Drugi gracz dolaczyl! START GRY!\n");
-            sleep(1);
-            break;
-        }
-        sleep(1);
-    }
-
-    // --- ROZDZIELENIE PROCESÓW ---
-    if ((pid_dziecka = fork()) == 0) {
-        // === PROCES DZIECKO (WYŚWIETLANIE) ===
-        struct msgbuf zapytanie, odpowiedz;
-        
-        while(1) {
-            // Pytanie o stan
-            zapytanie.mtype = MSG_STAN;
-            zapytanie.wybor = MSG_STAN;
-            zapytanie.id_gracza = id;
-            msgsnd(msg, &zapytanie, sizeof(zapytanie) - sizeof(long), 0);
-            
-            // Odbiór stanu
-            if (msgrcv(msg, &odpowiedz, sizeof(odpowiedz) - sizeof(long), id, 0) != -1) {
-                clear_screen();
-                print_str("=== GRACZ "); print_int(id); print_str(" ===\n");
+        int n = read(0, input, 99);
+        if (n > 0) {
+            input[n] = 0;
+            char cmd;
+            int a1, a2, a3;
+            if (sscanf(input, "%c %d %d %d", &cmd, &a1, &a2, &a3) >= 1) {
+                Message ord;
+                ord.mtype = 1;
+                ord.src_id = my_pid;
                 
-                print_str("PUNKTY ZWYCIESTWA: "); 
-                print_int(odpowiedz.punkty); 
-                print_str(" / 5\n");
-                
-                print_str("Zasoby (Zloto): ");
-                print_int(odpowiedz.zasoby);
-                print_str("\n----------------------------\n");
-                print_str("ARMIA:\n");
-                print_str(" [0] Lekka Piechota:  "); print_int(odpowiedz.jednostki[0]); print_str("\n");
-                print_str(" [1] Ciezka Piechota: "); print_int(odpowiedz.jednostki[1]); print_str("\n");
-                print_str(" [2] Jazda:           "); print_int(odpowiedz.jednostki[2]); print_str("\n");
-                print_str(" [3] Robotnicy:       "); print_int(odpowiedz.jednostki[3]); print_str("\n");
-                print_str("----------------------------\n");
-                print_str("AKCJE: 1. Buduj   2. Atak\n");
-                print_str("Twoj wybor: ");
-            }
-
-            // Sprawdzanie wyniku (czy ktoś wygrał)
-            zapytanie.mtype = MSG_WYNIK;
-            zapytanie.wybor = MSG_WYNIK;
-            zapytanie.id_gracza = id;
-            msgsnd(msg, &zapytanie, sizeof(zapytanie) - sizeof(long), 0);
-            msgrcv(msg, &odpowiedz, sizeof(odpowiedz) - sizeof(long), id, 0);
-
-            if (odpowiedz.liczba == 1) {
-                print_str("\n\n!!! GRATULACJE! WYGRALES !!!\n");
-                kill(getppid(), SIGKILL);
-                exit(0);
-            } 
-            else if (odpowiedz.liczba == 2) {
-                print_str("\n\n!!! PRZEGRALES !!!\n");
-                kill(getppid(), SIGKILL);
-                exit(0);
-            }
-
-            sleep(1);
-        }
-    } else {
-        // === PROCES RODZIC (KLAWIATURA) ===
-        struct msgbuf rozkaz;
-        
-        while(1) {
-            // Czekamy na input (blokująco)
-            int opcja = get_int();
-            
-            if (opcja == 1) {
-                // ZATRZYMUJEMY ODŚWIEŻANIE (DZIECKO)
-                kill(pid_dziecka, SIGSTOP);
-                
-                clear_screen();
-                print_str("=== BUDOWANIE ===\n");
-                print_str("Typ (0-Lekka, 1-Ciezka, 2-Jazda, 3-Rob): ");
-                int typ = get_int();
-                
-                print_str("Ilosc: ");
-                int ilosc = get_int();
-                
-                rozkaz.mtype = MSG_BUDUJ;
-                rozkaz.wybor = MSG_BUDUJ;
-                rozkaz.id_gracza = id;
-                rozkaz.indeks_jednostki = typ;
-                rozkaz.liczba = ilosc;
-                
-                msgsnd(msg, &rozkaz, sizeof(rozkaz) - sizeof(long), 0);
-                
-                // Czekamy na odpowiedź czy starczyło złota
-                msgrcv(msg, &rozkaz, sizeof(rozkaz) - sizeof(long), id, 0);
-                
-                if (rozkaz.liczba == 0) {
-                    print_str("\n[!!!] BLAD: ZA MALO SRODKOW! [!!!]\n");
-                    sleep(2);
-                } else {
-                    print_str("\nRozpoczeto budowe.\n");
-                    sleep(1);
+                if (cmd == 'b') {
+                    ord.cmd = CMD_BUILD;
+                    ord.args[0] = a1; 
+                    ord.args[1] = a2; 
+                    msgsnd(msg_id, &ord, sizeof(Message) - sizeof(long), 0);
+                } else if (cmd == 'a') {
+                    ord.cmd = CMD_ATTACK;
+                    ord.args[0] = a1;
+                    ord.args[1] = a2;
+                    ord.args[2] = a3;
+                    msgsnd(msg_id, &ord, sizeof(Message) - sizeof(long), 0);
                 }
-                
-                // WZNAWIAMY ODŚWIEŻANIE
-                kill(pid_dziecka, SIGCONT);
             }
-            else if (opcja == 2) {
-                // ZATRZYMUJEMY ODŚWIEŻANIE
-                kill(pid_dziecka, SIGSTOP);
-                
-                clear_screen();
-                print_str("=== ATAK ===\n");
-                print_str("Podaj ilosc wojsk (Lekka Ciezka Jazda) oddzielone spacja:\n");
-                
-                int l, c, j;
-                get_three_ints(&l, &c, &j);
-                
-                rozkaz.mtype = MSG_ATAK;
-                rozkaz.wybor = MSG_ATAK;
-                rozkaz.id_gracza = id;
-                rozkaz.jednostki[0] = l;
-                rozkaz.jednostki[1] = c;
-                rozkaz.jednostki[2] = j;
-                rozkaz.jednostki[3] = 0; // Robotnicy nie walczą
-                
-                msgsnd(msg, &rozkaz, sizeof(rozkaz) - sizeof(long), 0);
-                
-                // Czekamy na potwierdzenie ataku
-                msgrcv(msg, &rozkaz, sizeof(rozkaz) - sizeof(long), id, 0);
-                
-                if (rozkaz.liczba == 0) {
-                    print_str("\n[!!!] BLAD: NIE MASZ TYLE WOJSKA! [!!!]\n");
-                    sleep(2);
-                } else {
-                    print_str("\nATAK WYSLANY!\n");
-                    sleep(1);
-                }
-                
-                // WZNAWIAMY ODŚWIEŻANIE
-                kill(pid_dziecka, SIGCONT);
-            }
+            write(1, "\033[10;0H\033[K> ", 11); 
         }
     }
-    return 0;
 }
