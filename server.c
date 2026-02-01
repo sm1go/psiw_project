@@ -1,267 +1,246 @@
-#include <unistd.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <string.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <stdio.h>
-#include <math.h>
-#include <time.h>
 #include "common.h"
 
-int shm_id, sem_id, msg_id;
-GameState *game;
+int shmid, semid, msgid;
+struct GameState *gs;
 
-struct sembuf p_op = {0, -1, 0};
-struct sembuf v_op = {0, 1, 0};
-
-void my_write(const char* str) {
-    write(1, str, strlen(str));
+void my_memcpy(void *dest, void *src, int n) {
+    char *csrc = (char *)src;
+    char *cdest = (char *)dest;
+    int i;
+    for (i=0; i<n; i++) cdest[i] = csrc[i];
 }
 
-void clean_exit(int sig) {
-    shmdt(game);
-    shmctl(shm_id, IPC_RMID, NULL);
-    semctl(sem_id, 0, IPC_RMID);
-    msgctl(msg_id, IPC_RMID, NULL);
-    exit(0);
+void init_stats(struct UnitStats *s, int c, int a, int d, int t) {
+    s->cost = c; s->attack = a; s->defense = d; s->time = t;
 }
 
-void init_ipc() {
-    key_t key = ftok(".", KEY_ID);
-    shm_id = shmget(key, sizeof(GameState), IPC_CREAT | 0666);
-    game = (GameState*)shmat(shm_id, NULL, 0);
-    memset(game, 0, sizeof(GameState));
-    
-    sem_id = semget(key, 1, IPC_CREAT | 0666);
-    semctl(sem_id, 0, SETVAL, 1);
-    
-    msg_id = msgget(key, IPC_CREAT | 0666);
-    
-    game->players[0].gold = 300;
-    game->players[1].gold = 300;
-    game->players[0].id = 0;
-    game->players[1].id = 1;
+void get_stats(int type, struct UnitStats *s) {
+    if (type == U_LIGHT) init_stats(s, 100, 10, 12, 2);
+    else if (type == U_HEAVY) init_stats(s, 250, 15, 30, 3);
+    else if (type == U_CAV) init_stats(s, 550, 35, 12, 5);
+    else if (type == U_WORK) init_stats(s, 150, 0, 0, 2);
 }
 
-double get_attack(int type) {
-    if (type == UNIT_LIGHT) return 1.0;
-    if (type == UNIT_HEAVY) return 1.5;
-    if (type == UNIT_CAVALRY) return 3.5;
-    return 0.0;
+void sem_lock() {
+    struct sembuf sb;
+    sb.sem_num = 0;
+    sb.sem_op = -1;
+    sb.sem_flg = 0;
+    semop(semid, &sb, 1);
 }
 
-double get_defense(int type) {
-    if (type == UNIT_LIGHT) return 1.2;
-    if (type == UNIT_HEAVY) return 3.0;
-    if (type == UNIT_CAVALRY) return 1.2;
-    return 0.0;
+void sem_unlock() {
+    struct sembuf sb;
+    sb.sem_num = 0;
+    sb.sem_op = 1;
+    sb.sem_flg = 0;
+    semop(semid, &sb, 1);
 }
 
-int get_cost(int type) {
-    if (type == UNIT_LIGHT) return 100;
-    if (type == UNIT_HEAVY) return 250;
-    if (type == UNIT_CAVALRY) return 550;
-    if (type == UNIT_WORKER) return 150;
-    return 0;
+void handle_training(struct Player *p, long current_tick) {
+    if (p->training.active) {
+        if (current_tick >= p->training.next_tick) {
+            p->units[p->training.unit_type]++;
+            p->training.count--;
+            if (p->training.count > 0) {
+                struct UnitStats s;
+                get_stats(p->training.unit_type, &s);
+                p->training.next_tick = current_tick + s.time;
+            } else {
+                p->training.active = 0;
+            }
+        }
+    }
 }
 
-int get_time(int type) {
-    if (type == UNIT_LIGHT) return 2;
-    if (type == UNIT_HEAVY) return 3;
-    if (type == UNIT_CAVALRY) return 5;
-    if (type == UNIT_WORKER) return 2;
-    return 0;
-}
+void resolve_battle() {
+    struct Player *att, *def;
+    if (gs->battle.attacker_id == 1) { att = &gs->p1; def = &gs->p2; }
+    else { att = &gs->p2; def = &gs->p1; }
 
-void resolve_combat(int attacker_id, int u_light, int u_heavy, int u_cav) {
-    int defender_id = (attacker_id + 1) % 2;
-    PlayerData *att = &game->players[attacker_id];
-    PlayerData *def = &game->players[defender_id];
+    int sa = 0;
+    int sb = 0;
+    struct UnitStats s;
 
-    double sa = u_light * get_attack(UNIT_LIGHT) + u_heavy * get_attack(UNIT_HEAVY) + u_cav * get_attack(UNIT_CAVALRY);
-    double sb = def->units[UNIT_LIGHT] * get_defense(UNIT_LIGHT) + 
-                def->units[UNIT_HEAVY] * get_defense(UNIT_HEAVY) + 
-                def->units[UNIT_CAVALRY] * get_defense(UNIT_CAVALRY); // Workers don't defend
+    for(int i=0; i<4; i++) {
+        if (i==U_WORK) continue;
+        get_stats(i, &s);
+        sa += gs->battle.units[i] * s.attack;
+    }
 
-    char buf[256];
-    int won = 0;
+    for(int i=0; i<4; i++) {
+        get_stats(i, &s);
+        sb += def->units[i] * s.defense;
+    }
+
+    sa = sa / 10; 
+    sb = sb / 10; 
 
     if (sa > sb) {
-        won = 1;
-        att->wins++;
-        memset(def->units, 0, sizeof(def->units)); 
-        def->worker_count = 0; 
+        for(int i=0; i<4; i++) def->units[i] = 0;
+        att->points++;
     } else {
-        if (sb > 0) {
-            for (int i = 0; i < 3; i++) {
-                int loss = floor(def->units[i] * (sa / sb));
-                def->units[i] -= loss;
+        for(int i=0; i<4; i++) {
+            if (def->units[i] > 0) {
+                int lost = (def->units[i] * sa) / sb;
+                def->units[i] -= lost;
                 if (def->units[i] < 0) def->units[i] = 0;
             }
         }
     }
 
-    double sb_counter = def->units[UNIT_LIGHT] * get_attack(UNIT_LIGHT) + 
-                        def->units[UNIT_HEAVY] * get_attack(UNIT_HEAVY) + 
-                        def->units[UNIT_CAVALRY] * get_attack(UNIT_CAVALRY);
-    
-    double sa_defense = (att->units[UNIT_LIGHT] - u_light) * get_defense(UNIT_LIGHT) +
-                        (att->units[UNIT_HEAVY] - u_heavy) * get_defense(UNIT_HEAVY) +
-                        (att->units[UNIT_CAVALRY] - u_cav) * get_defense(UNIT_CAVALRY); 
+    int def_att_power = 0;
+    for(int i=0; i<4; i++) {
+        get_stats(i, &s);
+        if (i!=U_WORK) def_att_power += def->units[i] * s.attack;
+    }
+    def_att_power /= 10;
 
-    sa_defense += u_light * 1.2 + u_heavy * 3.0 + u_cav * 1.2;
+    int att_def_power = 0;
+    for(int i=0; i<4; i++) {
+        get_stats(i, &s);
+        if (i!=U_WORK) att_def_power += gs->battle.units[i] * s.defense; 
+        else att_def_power += 0; 
+    }
+    att_def_power /= 10;
 
-    if (sb_counter > 0 && sa_defense > 0) {
-       
+    if (def_att_power > att_def_power) {
+        for(int i=0; i<4; i++) gs->battle.units[i] = 0;
+    } else {
+         for(int i=0; i<4; i++) {
+            if (gs->battle.units[i] > 0) {
+                int lost = (gs->battle.units[i] * def_att_power) / att_def_power;
+                gs->battle.units[i] -= lost;
+                if (gs->battle.units[i] < 0) gs->battle.units[i] = 0;
+            }
+        }
     }
 
-    Message msg;
-    msg.mtype = game->client_pids[attacker_id];
-    msg.cmd = MSG_RESULT;
-    if (won) sprintf(msg.text, "Atak udany! Wygrales bitwe.");
-    else sprintf(msg.text, "Atak odparty przez wroga.");
-    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+    for(int i=0; i<4; i++) att->units[i] += gs->battle.units[i];
 
-    msg.mtype = game->client_pids[defender_id];
-    if (won) sprintf(msg.text, "Twoja baza zostala zniszczona!");
-    else sprintf(msg.text, "Odparles atak wroga.");
-    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+    gs->battle.active = 0;
 }
 
-void logic_loop() {
-    while (1) {
-        semop(sem_id, &p_op, 1);
+void logic_handler(int sig) {
+    sem_lock();
+    gs->tick++;
+
+    gs->p1.gold += 50 + (gs->p1.units[U_WORK] * 5);
+    gs->p2.gold += 50 + (gs->p2.units[U_WORK] * 5);
+
+    handle_training(&gs->p1, gs->tick);
+    handle_training(&gs->p2, gs->tick);
+
+    if (gs->battle.active && gs->tick >= gs->battle.tick_end) {
+        resolve_battle();
+    }
+
+    if (gs->cmd_slot.active) {
+        struct Player *p = (gs->cmd_slot.player_id == 1) ? &gs->p1 : &gs->p2;
         
-        for (int i = 0; i < 2; i++) {
-            if (game->client_pids[i] == 0) continue;
-
-            game->players[i].gold += 50 + (game->players[i].worker_count * 5);
-
-            int head = game->queue_head[i];
-            int tail = game->queue_tail[i];
-            
-            if (head != tail) {
-                game->build_queue[i][head].time_left--;
-                if (game->build_queue[i][head].time_left <= 0) {
-                    int type = game->build_queue[i][head].type;
-                    int count = game->build_queue[i][head].count;
-                    if (type == UNIT_WORKER) game->players[i].worker_count += count;
-                    else game->players[i].units[type] += count;
-                    
-                    game->queue_head[i] = (head + 1) % MAX_QUEUE;
+        if (gs->cmd_slot.type == 'T') {
+            if (p->training.active == 0) {
+                struct UnitStats s;
+                get_stats(gs->cmd_slot.u_type, &s);
+                int total_cost = s.cost * gs->cmd_slot.count;
+                if (p->gold >= total_cost) {
+                    p->gold -= total_cost;
+                    p->training.active = 1;
+                    p->training.unit_type = gs->cmd_slot.u_type;
+                    p->training.count = gs->cmd_slot.count;
+                    p->training.next_tick = gs->tick + s.time;
                 }
             }
-
-            if (game->players[i].wins >= 5) {
-                Message msg;
-                msg.cmd = MSG_GAME_OVER;
-                msg.mtype = game->client_pids[i];
-                sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
-                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
-
-                msg.mtype = game->client_pids[(i + 1) % 2];
-                sprintf(msg.text, "PRZEGRALES GRE. SPROBUJ PONOWNIE.");
-                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
-                
-                semop(sem_id, &v_op, 1);
-                sleep(1);
-                kill(getppid(), SIGINT);
-                exit(0);
-            }
+        } else if (gs->cmd_slot.type == 'A') {
+             if (gs->battle.active == 0 && gs->cmd_slot.u_type != U_WORK) {
+                 int count = gs->cmd_slot.count;
+                 if (p->units[gs->cmd_slot.u_type] >= count) {
+                     p->units[gs->cmd_slot.u_type] -= count;
+                     gs->battle.active = 1;
+                     gs->battle.attacker_id = gs->cmd_slot.player_id;
+                     gs->battle.tick_end = gs->tick + 5;
+                     for(int k=0; k<4; k++) gs->battle.units[k] = 0;
+                     gs->battle.units[gs->cmd_slot.u_type] = count;
+                 }
+             }
         }
-        
-        semop(sem_id, &v_op, 1);
-        
-        for(int i=0; i<2; i++) {
-            if (game->client_pids[i] != 0) {
-                Message update;
-                update.mtype = game->client_pids[i];
-                update.cmd = MSG_STATE;
-                update.args[0] = game->players[i].gold;
-                update.args[1] = game->players[i].units[0]; 
-                update.args[2] = game->players[i].units[1];
-                update.args[3] = game->players[i].units[2];
-                msgsnd(msg_id, &update, sizeof(Message) - sizeof(long), 0);
-            }
-        }
-        sleep(1);
+        gs->cmd_slot.active = 0;
     }
+
+    sem_unlock();
+    alarm(1);
+}
+
+void process_comms() {
+    struct MsgBuf mb;
+    
+    if (msgrcv(msgid, &mb, sizeof(struct MsgBuf)-sizeof(long), 1, IPC_NOWAIT) != -1) {
+        sem_lock();
+        if (gs->cmd_slot.active == 0) {
+            gs->cmd_slot.active = 1;
+            gs->cmd_slot.player_id = mb.player_id;
+            gs->cmd_slot.type = mb.cmd_type;
+            gs->cmd_slot.u_type = mb.u_type;
+            gs->cmd_slot.count = mb.count;
+        }
+        sem_unlock();
+    }
+
+    if (msgrcv(msgid, &mb, sizeof(struct MsgBuf)-sizeof(long), 2, IPC_NOWAIT) != -1) {
+        sem_lock();
+        if (gs->cmd_slot.active == 0) {
+            gs->cmd_slot.active = 1;
+            gs->cmd_slot.player_id = mb.player_id;
+            gs->cmd_slot.type = mb.cmd_type;
+            gs->cmd_slot.u_type = mb.u_type;
+            gs->cmd_slot.count = mb.count;
+        }
+        sem_unlock();
+    }
+
+    sem_lock();
+    struct MsgBuf update;
+    update.mtype = 10;
+    my_memcpy(update.raw_text, &gs->p1, sizeof(struct Player));
+    msgsnd(msgid, &update, sizeof(struct MsgBuf)-sizeof(long), 0);
+    
+    update.mtype = 20;
+    my_memcpy(update.raw_text, &gs->p2, sizeof(struct Player));
+    msgsnd(msgid, &update, sizeof(struct MsgBuf)-sizeof(long), 0);
+    sem_unlock();
 }
 
 int main() {
-    signal(SIGINT, clean_exit);
-    init_ipc();
+    shmid = shmget(KEY_SHM, sizeof(struct GameState), IPC_CREAT | 0666);
+    gs = (struct GameState*)shmat(shmid, NULL, 0);
     
+    semid = semget(KEY_SEM, 1, IPC_CREAT | 0666);
+    union semun arg;
+    arg.val = 1;
+    semctl(semid, 0, SETVAL, arg);
+
+    msgid = msgget(KEY_MSG, IPC_CREAT | 0666);
+
+    sem_lock();
+    gs->tick = 0;
+    gs->p1.id = 1; gs->p1.gold = 300; gs->p1.points = 0; gs->p1.training.active = 0;
+    gs->p2.id = 2; gs->p2.gold = 300; gs->p2.points = 0; gs->p2.training.active = 0;
+    for(int i=0; i<4; i++) { gs->p1.units[i]=0; gs->p2.units[i]=0; }
+    gs->battle.active = 0;
+    gs->cmd_slot.active = 0;
+    sem_unlock();
+
     if (fork() == 0) {
-        logic_loop();
-        exit(0);
-    }
-
-    my_write("Serwer uruchomiony. Oczekiwanie na graczy...\n");
-
-    Message msg;
-    while (1) {
-        msgrcv(msg_id, &msg, sizeof(Message) - sizeof(long), 1, 0);
-        
-        semop(sem_id, &p_op, 1);
-        
-        if (msg.cmd == CMD_LOGIN) {
-            if (game->connected_clients < 2) {
-                int pid = msg.src_id;
-                int idx = game->connected_clients;
-                game->client_pids[idx] = pid;
-                game->connected_clients++;
-                
-                Message reply;
-                reply.mtype = pid;
-                reply.cmd = CMD_LOGIN;
-                reply.args[0] = idx; 
-                msgsnd(msg_id, &reply, sizeof(Message) - sizeof(long), 0);
-            }
-        } else if (msg.cmd == CMD_BUILD) {
-            int p_idx = -1;
-            if (msg.src_id == game->client_pids[0]) p_idx = 0;
-            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
-
-            if (p_idx != -1) {
-                int type = msg.args[0];
-                int count = msg.args[1];
-                int cost = get_cost(type) * count;
-                
-                if (game->players[p_idx].gold >= cost) {
-                    int tail = game->queue_tail[p_idx];
-                    int next_tail = (tail + 1) % MAX_QUEUE;
-                    if (next_tail != game->queue_head[p_idx]) {
-                        game->players[p_idx].gold -= cost;
-                        game->build_queue[p_idx][tail].type = type;
-                        game->build_queue[p_idx][tail].count = count;
-                        game->build_queue[p_idx][tail].time_left = get_time(type); // simplified: full time per batch
-                        game->queue_tail[p_idx] = next_tail;
-                    }
-                }
-            }
-        } else if (msg.cmd == CMD_ATTACK) {
-             int p_idx = -1;
-            if (msg.src_id == game->client_pids[0]) p_idx = 0;
-            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
-            
-            if (p_idx != -1) {
-                 int ul = msg.args[0];
-                 int uh = msg.args[1];
-                 int uc = msg.args[2];
-                 
-                 if (game->players[p_idx].units[UNIT_LIGHT] >= ul &&
-                     game->players[p_idx].units[UNIT_HEAVY] >= uh &&
-                     game->players[p_idx].units[UNIT_CAVALRY] >= uc) {
-                         
-                     resolve_combat(p_idx, ul, uh, uc);
-                 }
-            }
+        signal(SIGALRM, logic_handler);
+        alarm(1);
+        while(1) {
+            pause();
         }
-
-        semop(sem_id, &v_op, 1);
+    } else {
+        while(1) {
+            process_comms();
+            usleep(100000); 
+        }
     }
+    return 0;
 }
