@@ -1,79 +1,51 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <unistd.h>
-#include <signal.h>
-#include <time.h>
-#include <math.h>
-#include <sys/select.h>
-#include <termios.h>
 
-#define KEY_MSG 1234
-#define KEY_SHM 5678
-#define KEY_SEM 9012
-
-#define MAX_TEXT 512
-
+#define KEY_ID 12345
+#define MAX_QUEUE 10
 #define UNIT_LIGHT 0
 #define UNIT_HEAVY 1
 #define UNIT_CAVALRY 2
 #define UNIT_WORKER 3
 
-typedef struct {
-    int cost;
-    double attack;
-    double defense;
-    int time;
-} UnitStats;
-
-static const UnitStats UNITS[4] = {
-    {100, 1.0, 1.2, 2},
-    {250, 1.5, 3.0, 3},
-    {550, 3.5, 1.2, 5},
-    {150, 0.0, 0.0, 2}
-};
+#define CMD_LOGIN 1
+#define CMD_BUILD 2
+#define CMD_ATTACK 3
+#define MSG_STATE 4
+#define MSG_RESULT 5
+#define MSG_GAME_OVER 6
 
 typedef struct {
-    long type;
-    int source_id;
-    int cmd;
-    int args[5];
-    char text[MAX_TEXT];
-} Message;
+    int id;
+    int gold;
+    int units[4];
+    int wins;
+    int worker_count;
+} PlayerData;
 
 typedef struct {
     int type;
     int count;
     int time_left;
-} ProductionTask;
+} BuildTask;
 
 typedef struct {
-    int resources;
-    int units[4];
-    int wins;
-    int workers_active;
-    ProductionTask production_queue[10];
-    int q_size;
-} Player;
-
-typedef struct {
-    Player players[2];
+    PlayerData players[2];
+    BuildTask build_queue[2][MAX_QUEUE];
+    int queue_head[2];
+    int queue_tail[2];
     int connected_clients;
-    int game_over;
+    pid_t client_pids[2];
 } GameState;
 
-#define CMD_LOGIN 1
-#define CMD_TRAIN 2
-#define CMD_ATTACK 3
-#define CMD_UPDATE 4
-#define CMD_RESULT 5
+typedef struct {
+    long mtype;
+    int src_id;
+    int cmd;
+    int args[4];
+    char text[256];
+} Message;
 
 #endif
