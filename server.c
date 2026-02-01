@@ -1,27 +1,9 @@
-#include <unistd.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <string.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <stdio.h>
-#include <math.h>
-#include <time.h>
 #include "common.h"
 
 int shm_id, sem_id, msg_id;
 GameState *game;
 
-struct sembuf p_op = {0, -1, 0};
-struct sembuf v_op = {0, 1, 0};
-
-void my_write(const char* str) {
-    write(1, str, strlen(str));
-}
-
-void clean_exit(int sig) {
+void cleanup(int sig) {
     shmdt(game);
     shmctl(shm_id, IPC_RMID, NULL);
     semctl(sem_id, 0, IPC_RMID);
@@ -29,239 +11,200 @@ void clean_exit(int sig) {
     exit(0);
 }
 
-void init_ipc() {
-    key_t key = ftok(".", KEY_ID);
-    shm_id = shmget(key, sizeof(GameState), IPC_CREAT | 0666);
-    game = (GameState*)shmat(shm_id, NULL, 0);
-    memset(game, 0, sizeof(GameState));
-    
-    sem_id = semget(key, 1, IPC_CREAT | 0666);
-    semctl(sem_id, 0, SETVAL, 1);
-    
-    msg_id = msgget(key, IPC_CREAT | 0666);
-    
-    game->players[0].gold = 300;
-    game->players[1].gold = 300;
-    game->players[0].id = 0;
-    game->players[1].id = 1;
+void semaphore_op(int op) {
+    struct sembuf sb;
+    sb.sem_num = 0;
+    sb.sem_op = op;
+    sb.sem_flg = 0;
+    semop(sem_id, &sb, 1);
 }
 
-double get_attack(int type) {
-    if (type == UNIT_LIGHT) return 1.0;
-    if (type == UNIT_HEAVY) return 1.5;
-    if (type == UNIT_CAVALRY) return 3.5;
-    return 0.0;
-}
-
-double get_defense(int type) {
-    if (type == UNIT_LIGHT) return 1.2;
-    if (type == UNIT_HEAVY) return 3.0;
-    if (type == UNIT_CAVALRY) return 1.2;
-    return 0.0;
-}
-
-int get_cost(int type) {
-    if (type == UNIT_LIGHT) return 100;
-    if (type == UNIT_HEAVY) return 250;
-    if (type == UNIT_CAVALRY) return 550;
-    if (type == UNIT_WORKER) return 150;
-    return 0;
-}
-
-int get_time(int type) {
-    if (type == UNIT_LIGHT) return 2;
-    if (type == UNIT_HEAVY) return 3;
-    if (type == UNIT_CAVALRY) return 5;
-    if (type == UNIT_WORKER) return 2;
-    return 0;
-}
-
-void resolve_combat(int attacker_id, int u_light, int u_heavy, int u_cav) {
-    int defender_id = (attacker_id + 1) % 2;
-    PlayerData *att = &game->players[attacker_id];
-    PlayerData *def = &game->players[defender_id];
-
-    double sa = u_light * get_attack(UNIT_LIGHT) + u_heavy * get_attack(UNIT_HEAVY) + u_cav * get_attack(UNIT_CAVALRY);
-    double sb = def->units[UNIT_LIGHT] * get_defense(UNIT_LIGHT) + 
-                def->units[UNIT_HEAVY] * get_defense(UNIT_HEAVY) + 
-                def->units[UNIT_CAVALRY] * get_defense(UNIT_CAVALRY); // Workers don't defend
-
-    char buf[256];
-    int won = 0;
-
-    if (sa > sb) {
-        won = 1;
-        att->wins++;
-        memset(def->units, 0, sizeof(def->units)); 
-        def->worker_count = 0; 
-    } else {
-        if (sb > 0) {
-            for (int i = 0; i < 3; i++) {
-                int loss = floor(def->units[i] * (sa / sb));
-                def->units[i] -= loss;
-                if (def->units[i] < 0) def->units[i] = 0;
-            }
-        }
-    }
-
-    double sb_counter = def->units[UNIT_LIGHT] * get_attack(UNIT_LIGHT) + 
-                        def->units[UNIT_HEAVY] * get_attack(UNIT_HEAVY) + 
-                        def->units[UNIT_CAVALRY] * get_attack(UNIT_CAVALRY);
-    
-    double sa_defense = (att->units[UNIT_LIGHT] - u_light) * get_defense(UNIT_LIGHT) +
-                        (att->units[UNIT_HEAVY] - u_heavy) * get_defense(UNIT_HEAVY) +
-                        (att->units[UNIT_CAVALRY] - u_cav) * get_defense(UNIT_CAVALRY); 
-
-    sa_defense += u_light * 1.2 + u_heavy * 3.0 + u_cav * 1.2;
-
-    if (sb_counter > 0 && sa_defense > 0) {
-       
-    }
-
+void send_end_game(int winner_id) {
     Message msg;
-    msg.mtype = game->client_pids[attacker_id];
-    msg.cmd = MSG_RESULT;
-    if (won) sprintf(msg.text, "Atak udany! Wygrales bitwe.");
-    else sprintf(msg.text, "Atak odparty przez wroga.");
-    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+    msg.cmd = CMD_RESULT;
+    game->game_over = 1;
 
-    msg.mtype = game->client_pids[defender_id];
-    if (won) sprintf(msg.text, "Twoja baza zostala zniszczona!");
-    else sprintf(msg.text, "Odparles atak wroga.");
-    msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+    for(int i=0; i<2; i++) {
+        msg.type = 10 + i;
+        if (i == winner_id) {
+            sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
+        } else {
+            sprintf(msg.text, "PORAZKA! PRZECIWNIK ZDOBYL 5 PUNKTOW.");
+        }
+        msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
+    }
 }
 
-void logic_loop() {
-    while (1) {
-        semop(sem_id, &p_op, 1);
-        
-        for (int i = 0; i < 2; i++) {
-            if (game->client_pids[i] == 0) continue;
+void send_update() {
+    Message msg;
+    msg.cmd = CMD_UPDATE;
+    
+    for(int i=0; i<2; i++) {
+        msg.type = 10 + i;
+        sprintf(msg.text, "ZASOBY: %d | ROB: %d | WIN: %d\nARMIA: L:%d C:%d J:%d\nPRODUKCJA: %d zadan", 
+            game->players[i].resources, 
+            game->players[i].units[UNIT_WORKER], 
+            game->players[i].wins,
+            game->players[i].units[UNIT_LIGHT],
+            game->players[i].units[UNIT_HEAVY],
+            game->players[i].units[UNIT_CAVALRY],
+            game->players[i].q_size);
+        msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), IPC_NOWAIT);
+    }
+}
 
-            game->players[i].gold += 50 + (game->players[i].worker_count * 5);
+void resolve_attack(int attacker_id, int units_sent[3]) {
+    int defender_id = (attacker_id == 0) ? 1 : 0;
+    
+    double attack_power = 
+        units_sent[UNIT_LIGHT] * UNITS[UNIT_LIGHT].attack +
+        units_sent[UNIT_HEAVY] * UNITS[UNIT_HEAVY].attack +
+        units_sent[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].attack;
 
-            int head = game->queue_head[i];
-            int tail = game->queue_tail[i];
-            
-            if (head != tail) {
-                game->build_queue[i][head].time_left--;
-                if (game->build_queue[i][head].time_left <= 0) {
-                    int type = game->build_queue[i][head].type;
-                    int count = game->build_queue[i][head].count;
-                    if (type == UNIT_WORKER) game->players[i].worker_count += count;
-                    else game->players[i].units[type] += count;
-                    
-                    game->queue_head[i] = (head + 1) % MAX_QUEUE;
-                }
-            }
+    double defense_power = 
+        game->players[defender_id].units[UNIT_LIGHT] * UNITS[UNIT_LIGHT].defense +
+        game->players[defender_id].units[UNIT_HEAVY] * UNITS[UNIT_HEAVY].defense +
+        game->players[defender_id].units[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].defense;
 
-            if (game->players[i].wins >= 5) {
-                Message msg;
-                msg.cmd = MSG_GAME_OVER;
-                msg.mtype = game->client_pids[i];
-                sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
-                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
+    if (defense_power == 0) defense_power = 0.1;
 
-                msg.mtype = game->client_pids[(i + 1) % 2];
-                sprintf(msg.text, "PRZEGRALES GRE. SPROBUJ PONOWNIE.");
-                msgsnd(msg_id, &msg, sizeof(Message) - sizeof(long), 0);
-                
-                semop(sem_id, &v_op, 1);
-                sleep(1);
-                kill(getppid(), SIGINT);
-                exit(0);
-            }
+    if (attack_power > defense_power) {
+        game->players[attacker_id].wins++;
+        for(int u=0; u<3; u++) game->players[defender_id].units[u] = 0;
+
+        if (game->players[attacker_id].wins >= 5) {
+            send_end_game(attacker_id);
         }
-        
-        semop(sem_id, &v_op, 1);
-        
-        for(int i=0; i<2; i++) {
-            if (game->client_pids[i] != 0) {
-                Message update;
-                update.mtype = game->client_pids[i];
-                update.cmd = MSG_STATE;
-                update.args[0] = game->players[i].gold;
-                update.args[1] = game->players[i].units[0]; 
-                update.args[2] = game->players[i].units[1];
-                update.args[3] = game->players[i].units[2];
-                msgsnd(msg_id, &update, sizeof(Message) - sizeof(long), 0);
-            }
+
+    } else {
+        double ratio_def = attack_power / defense_power;
+        for(int u=0; u<3; u++) {
+            int lost = floor(game->players[defender_id].units[u] * ratio_def);
+            game->players[defender_id].units[u] -= lost;
         }
-        sleep(1);
+    }
+
+    double defender_attack = 
+        game->players[defender_id].units[UNIT_LIGHT] * UNITS[UNIT_LIGHT].attack +
+        game->players[defender_id].units[UNIT_HEAVY] * UNITS[UNIT_HEAVY].attack +
+        game->players[defender_id].units[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].attack;
+        
+    double attacker_defense = 
+        units_sent[UNIT_LIGHT] * UNITS[UNIT_LIGHT].defense +
+        units_sent[UNIT_HEAVY] * UNITS[UNIT_HEAVY].defense +
+        units_sent[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].defense;
+
+    if (attacker_defense == 0) attacker_defense = 0.1;
+
+    double ratio_atk = defender_attack / attacker_defense;
+    if (ratio_atk > 1.0) ratio_atk = 1.0;
+
+    for(int u=0; u<3; u++) {
+        int lost = floor(units_sent[u] * ratio_atk);
+        int returning = units_sent[u] - lost;
+        game->players[attacker_id].units[u] += returning;
     }
 }
 
 int main() {
-    signal(SIGINT, clean_exit);
-    init_ipc();
+    signal(SIGINT, cleanup);
+
+    shm_id = shmget(KEY_SHM, sizeof(GameState), IPC_CREAT | 0666);
+    game = (GameState*)shmat(shm_id, NULL, 0);
     
+    sem_id = semget(KEY_SEM, 1, IPC_CREAT | 0666);
+    semctl(sem_id, 0, SETVAL, 1);
+
+    msg_id = msgget(KEY_MSG, IPC_CREAT | 0666);
+
+    memset(game, 0, sizeof(GameState));
+    game->players[0].resources = 300;
+    game->players[1].resources = 300;
+
     if (fork() == 0) {
-        logic_loop();
-        exit(0);
-    }
-
-    my_write("Serwer uruchomiony. Oczekiwanie na graczy...\n");
-
-    Message msg;
-    while (1) {
-        msgrcv(msg_id, &msg, sizeof(Message) - sizeof(long), 1, 0);
-        
-        semop(sem_id, &p_op, 1);
-        
-        if (msg.cmd == CMD_LOGIN) {
-            if (game->connected_clients < 2) {
-                int pid = msg.src_id;
-                int idx = game->connected_clients;
-                game->client_pids[idx] = pid;
-                game->connected_clients++;
-                
-                Message reply;
-                reply.mtype = pid;
-                reply.cmd = CMD_LOGIN;
-                reply.args[0] = idx; 
-                msgsnd(msg_id, &reply, sizeof(Message) - sizeof(long), 0);
+        while(1) {
+            sleep(1);
+            semaphore_op(-1);
+            
+            if (game->game_over) {
+                semaphore_op(1);
+                exit(0);
             }
-        } else if (msg.cmd == CMD_BUILD) {
-            int p_idx = -1;
-            if (msg.src_id == game->client_pids[0]) p_idx = 0;
-            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
 
-            if (p_idx != -1) {
-                int type = msg.args[0];
-                int count = msg.args[1];
-                int cost = get_cost(type) * count;
+            for(int i=0; i<2; i++) {
+                game->players[i].resources += 50 + (game->players[i].units[UNIT_WORKER] * 5);
                 
-                if (game->players[p_idx].gold >= cost) {
-                    int tail = game->queue_tail[p_idx];
-                    int next_tail = (tail + 1) % MAX_QUEUE;
-                    if (next_tail != game->queue_head[p_idx]) {
-                        game->players[p_idx].gold -= cost;
-                        game->build_queue[p_idx][tail].type = type;
-                        game->build_queue[p_idx][tail].count = count;
-                        game->build_queue[p_idx][tail].time_left = get_time(type); // simplified: full time per batch
-                        game->queue_tail[p_idx] = next_tail;
+                if (game->players[i].q_size > 0) {
+                    game->players[i].production_queue[0].time_left--;
+                    if (game->players[i].production_queue[0].time_left <= 0) {
+                        int type = game->players[i].production_queue[0].type;
+                        int count = game->players[i].production_queue[0].count;
+                        game->players[i].units[type] += count;
+                        
+                        for(int k=0; k < game->players[i].q_size - 1; k++) {
+                            game->players[i].production_queue[k] = game->players[i].production_queue[k+1];
+                        }
+                        game->players[i].q_size--;
                     }
                 }
             }
-        } else if (msg.cmd == CMD_ATTACK) {
-             int p_idx = -1;
-            if (msg.src_id == game->client_pids[0]) p_idx = 0;
-            else if (msg.src_id == game->client_pids[1]) p_idx = 1;
-            
-            if (p_idx != -1) {
-                 int ul = msg.args[0];
-                 int uh = msg.args[1];
-                 int uc = msg.args[2];
-                 
-                 if (game->players[p_idx].units[UNIT_LIGHT] >= ul &&
-                     game->players[p_idx].units[UNIT_HEAVY] >= uh &&
-                     game->players[p_idx].units[UNIT_CAVALRY] >= uc) {
-                         
-                     resolve_combat(p_idx, ul, uh, uc);
-                 }
-            }
+            send_update();
+            semaphore_op(1);
         }
+    } else {
+        Message msg;
+        while(1) {
+            msgrcv(msg_id, &msg, sizeof(Message)-sizeof(long), 1, 0);
+            
+            semaphore_op(-1);
 
-        semop(sem_id, &v_op, 1);
+            if (game->game_over) {
+                semaphore_op(1);
+                break;
+            }
+
+            if (msg.cmd == CMD_LOGIN) {
+                if (game->connected_clients < 2) {
+                    msg.type = msg.source_id; 
+                    msg.args[0] = game->connected_clients;
+                    game->connected_clients++;
+                    msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
+                }
+            } else if (msg.cmd == CMD_TRAIN) {
+                int p_idx = msg.args[0];
+                int type = msg.args[1];
+                int count = msg.args[2];
+                int cost = UNITS[type].cost * count;
+                
+                if (game->players[p_idx].resources >= cost && game->players[p_idx].q_size < 10) {
+                    game->players[p_idx].resources -= cost;
+                    int q = game->players[p_idx].q_size;
+                    game->players[p_idx].production_queue[q].type = type;
+                    game->players[p_idx].production_queue[q].count = count;
+                    game->players[p_idx].production_queue[q].time_left = UNITS[type].time;
+                    game->players[p_idx].q_size++;
+                }
+            } else if (msg.cmd == CMD_ATTACK) {
+                int p_idx = msg.args[0];
+                int l = msg.args[1];
+                int h = msg.args[2];
+                int c = msg.args[3];
+                
+                if (game->players[p_idx].units[UNIT_LIGHT] >= l &&
+                    game->players[p_idx].units[UNIT_HEAVY] >= h &&
+                    game->players[p_idx].units[UNIT_CAVALRY] >= c) {
+                        
+                    game->players[p_idx].units[UNIT_LIGHT] -= l;
+                    game->players[p_idx].units[UNIT_HEAVY] -= h;
+                    game->players[p_idx].units[UNIT_CAVALRY] -= c;
+                    
+                    int sent[3] = {l, h, c};
+                    sleep(5); 
+                    resolve_attack(p_idx, sent);
+                }
+            }
+            semaphore_op(1);
+        }
     }
+    return 0;
 }
