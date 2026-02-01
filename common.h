@@ -9,10 +9,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <fcntl.h>
 
-#define KEY_SHM 11111
-#define KEY_MSG 22222
-#define KEY_SEM 33333
+#define KEY_SHM 12345
+#define KEY_MSG 12346
+#define KEY_SEM 12347
 
 #define U_LIGHT 0
 #define U_HEAVY 1

@@ -3,28 +3,77 @@
 int msgid;
 int my_id;
 
-void str_write(const char *s) {
+void raw_write(const char *s) {
     int len = 0;
     while(s[len]) len++;
     write(1, s, len);
 }
 
-void int_to_str(int n, char *buf) {
-    int i = 0, temp = n;
-    if (n == 0) { buf[0]='0'; buf[1]='\0'; return; }
-    int len = 0;
-    while(temp>0) { temp/=10; len++; }
-    for(i=0; i<len; i++) {
-        buf[len-1-i] = (n%10) + '0';
-        n/=10;
+void append_num(char *buf, int *pos, int n) {
+    char temp[16];
+    int i = 0, t = n;
+    if (n == 0) {
+        temp[0] = '0'; i = 1;
+    } else {
+        while(t > 0) { t /= 10; i++; }
+        t = n;
+        for(int j = 0; j < i; j++) {
+            temp[i - 1 - j] = (t % 10) + '0';
+            t /= 10;
+        }
     }
-    buf[len] = '\0';
+    for(int j = 0; j < i; j++) {
+        buf[*pos] = temp[j];
+        (*pos)++;
+    }
 }
 
-void print_num(int n) {
-    char buf[16];
-    int_to_str(n, buf);
-    str_write(buf);
+void append_str(char *buf, int *pos, const char *s) {
+    int i = 0;
+    while(s[i]) {
+        buf[*pos] = s[i];
+        (*pos)++;
+        i++;
+    }
+}
+
+void display_line(struct Player *p) {
+    char buf[256];
+    int pos = 0;
+
+    append_str(buf, &pos, "[Gracz "); append_num(buf, &pos, p->id);
+    append_str(buf, &pos, "] Zloto: "); append_num(buf, &pos, p->gold);
+    append_str(buf, &pos, " | PKT: "); append_num(buf, &pos, p->points);
+    append_str(buf, &pos, " | Armia L/C/J/R: ");
+    append_num(buf, &pos, p->units[U_LIGHT]); append_str(buf, &pos, "/");
+    append_num(buf, &pos, p->units[U_HEAVY]); append_str(buf, &pos, "/");
+    append_num(buf, &pos, p->units[U_CAV]); append_str(buf, &pos, "/");
+    append_num(buf, &pos, p->units[U_WORK]);
+
+    if (p->training.active) {
+        append_str(buf, &pos, " | TRENING T-");
+        append_num(buf, &pos, p->training.unit_type);
+        append_str(buf, &pos, " (");
+        append_num(buf, &pos, p->training.count);
+        append_str(buf, &pos, ")");
+    }
+    append_str(buf, &pos, "\n");
+    write(1, buf, pos);
+}
+
+void display_full_table(struct Player *p) {
+    char buf[512];
+    int pos = 0;
+    append_str(buf, &pos, "\n--- PELNY RAPORT ---\n");
+    append_str(buf, &pos, "Gracz: "); append_num(buf, &pos, p->id);
+    append_str(buf, &pos, "\nZloto: "); append_num(buf, &pos, p->gold);
+    append_str(buf, &pos, "\nPunkty: "); append_num(buf, &pos, p->points);
+    append_str(buf, &pos, "\nJednostki:\n 0-Lekka: "); append_num(buf, &pos, p->units[U_LIGHT]);
+    append_str(buf, &pos, "\n 1-Ciezka: "); append_num(buf, &pos, p->units[U_HEAVY]);
+    append_str(buf, &pos, "\n 2-Jazda:  "); append_num(buf, &pos, p->units[U_CAV]);
+    append_str(buf, &pos, "\n 3-Robol:  "); append_num(buf, &pos, p->units[U_WORK]);
+    append_str(buf, &pos, "\n--------------------\n");
+    write(1, buf, pos);
 }
 
 int str_to_int(char *s) {
@@ -36,33 +85,13 @@ int str_to_int(char *s) {
     return res;
 }
 
-void display_state(struct Player *p) {
-    str_write("\n------------------------\n");
-    str_write("Gracz "); print_num(p->id); str_write("\n");
-    str_write("Zloto: "); print_num(p->gold); str_write("\n");
-    str_write("Punkty: "); print_num(p->points); str_write("\n");
-    str_write("Jednostki:\n");
-    str_write(" Lekka: "); print_num(p->units[U_LIGHT]); str_write("\n");
-    str_write(" Ciezka: "); print_num(p->units[U_HEAVY]); str_write("\n");
-    str_write(" Jazda: "); print_num(p->units[U_CAV]); str_write("\n");
-    str_write(" Robotnicy: "); print_num(p->units[U_WORK]); str_write("\n");
-    if (p->training.active) {
-        str_write("Trening typ: "); print_num(p->training.unit_type);
-        str_write(" pozostalo: "); print_num(p->training.count); str_write("\n");
-    } else {
-        str_write("Brak aktywnego treningu\n");
-    }
-    str_write("------------------------\n");
-}
-
 int main(int argc, char *argv[]) {
     msgid = msgget(KEY_MSG, 0666);
     
     if (argc > 1) my_id = 2; else my_id = 1;
 
-    str_write("Start Klienta. ID: "); print_num(my_id); str_write("\n");
-    str_write("Komendy: t [typ] [ilosc] (trening), a [typ] [ilosc] (atak)\n");
-    str_write("Typy: 0-Lekka, 1-Ciezka, 2-Jazda, 3-Rob\n");
+    raw_write("Klient uruchomiony.\n");
+    raw_write("Komendy:\n t [typ] [ilosc] -> trening\n a [typ] [ilosc] -> atak\n s -> pokaz tabele\n");
 
     if (fork() == 0) {
         char buf[100];
@@ -70,6 +99,15 @@ int main(int argc, char *argv[]) {
             int n = read(0, buf, 99);
             if (n > 0) {
                 buf[n] = 0;
+                if (buf[0] == 's') {
+                    struct MsgBuf msg;
+                    msg.mtype = my_id;
+                    msg.player_id = my_id;
+                    msg.cmd_type = 'S'; 
+                    msgsnd(msgid, &msg, sizeof(struct MsgBuf)-sizeof(long), 0);
+                    continue;
+                }
+
                 struct MsgBuf msg;
                 msg.mtype = my_id;
                 msg.player_id = my_id;
@@ -90,6 +128,7 @@ int main(int argc, char *argv[]) {
                     msg.u_type = u_type;
                     msg.count = count;
                     msgsnd(msgid, &msg, sizeof(struct MsgBuf)-sizeof(long), 0);
+                    raw_write(" [Wyslano]\n");
                 }
             }
         }
@@ -98,12 +137,26 @@ int main(int argc, char *argv[]) {
         struct Player p;
         long listen_type = (my_id == 1) ? 10 : 20;
         
+        int show_full = 0;
+
         while(1) {
             if (msgrcv(msgid, &mb, sizeof(struct MsgBuf)-sizeof(long), listen_type, 0) != -1) {
                 char *src = mb.raw_text;
                 char *dest = (char *)&p;
                 for(int i=0; i<sizeof(struct Player); i++) dest[i] = src[i];
-                display_state(&p);
+                
+                struct MsgBuf cmd_check;
+                if (msgrcv(msgid, &cmd_check, sizeof(struct MsgBuf)-sizeof(long), my_id, IPC_NOWAIT) != -1) {
+                    if (cmd_check.cmd_type == 'S') show_full = 1;
+                    else msgsnd(msgid, &cmd_check, sizeof(struct MsgBuf)-sizeof(long), 0); 
+                }
+
+                if (show_full) {
+                    display_full_table(&p);
+                    show_full = 0;
+                } else {
+                    display_line(&p);
+                }
             }
         }
     }

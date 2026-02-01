@@ -75,6 +75,8 @@ void resolve_battle() {
 
     sa = sa / 10; 
     sb = sb / 10; 
+    if(sa==0) sa=1;
+    if(sb==0) sb=1;
 
     if (sa > sb) {
         for(int i=0; i<4; i++) def->units[i] = 0;
@@ -82,8 +84,9 @@ void resolve_battle() {
     } else {
         for(int i=0; i<4; i++) {
             if (def->units[i] > 0) {
-                int lost = (def->units[i] * sa) / sb;
-                def->units[i] -= lost;
+                long loss = (long)def->units[i] * sa;
+                loss = loss / sb;
+                def->units[i] -= (int)loss;
                 if (def->units[i] < 0) def->units[i] = 0;
             }
         }
@@ -100,17 +103,19 @@ void resolve_battle() {
     for(int i=0; i<4; i++) {
         get_stats(i, &s);
         if (i!=U_WORK) att_def_power += gs->battle.units[i] * s.defense; 
-        else att_def_power += 0; 
     }
     att_def_power /= 10;
+    if(def_att_power==0) def_att_power=1;
+    if(att_def_power==0) att_def_power=1;
 
     if (def_att_power > att_def_power) {
         for(int i=0; i<4; i++) gs->battle.units[i] = 0;
     } else {
          for(int i=0; i<4; i++) {
             if (gs->battle.units[i] > 0) {
-                int lost = (gs->battle.units[i] * def_att_power) / att_def_power;
-                gs->battle.units[i] -= lost;
+                long loss = (long)gs->battle.units[i] * def_att_power;
+                loss = loss / att_def_power;
+                gs->battle.units[i] -= (int)loss;
                 if (gs->battle.units[i] < 0) gs->battle.units[i] = 0;
             }
         }
@@ -210,6 +215,11 @@ void process_comms() {
     sem_unlock();
 }
 
+void write_str(const char *s) {
+    int len = 0; while(s[len]) len++;
+    write(1, s, len);
+}
+
 int main() {
     shmid = shmget(KEY_SHM, sizeof(struct GameState), IPC_CREAT | 0666);
     gs = (struct GameState*)shmat(shmid, NULL, 0);
@@ -237,6 +247,7 @@ int main() {
             pause();
         }
     } else {
+        write_str("Serwer wystartowal.\n");
         while(1) {
             process_comms();
             usleep(100000); 
