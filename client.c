@@ -1,12 +1,14 @@
 #include "common.h"
+#include <termios.h>
+#include <sys/select.h>
 
 int msg_id;
 int my_player_id = -1; 
 int my_msg_type = -1;
 
-char last_server_msg[MAX_TEXT];
 char input_buffer[256];
 int input_pos = 0;
+char last_server_msg[MAX_TEXT];
 
 struct termios orig_termios;
 
@@ -16,6 +18,7 @@ void write_stdout(const char* str) {
 
 void reset_terminal_mode() {
     tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+    write_stdout("\033[?25h");
 }
 
 void set_conio_mode() {
@@ -27,28 +30,40 @@ void set_conio_mode() {
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
 }
 
-void redraw() {
-    char out_buf[2048];
-    char temp_buf[512];
+void refresh_screen() {
+    char out_buf[4096];
+    char line_buf[512];
     
     strcpy(out_buf, "\033[2J\033[H"); 
+    strcat(out_buf, "\033[?25l");    
 
     if (strlen(last_server_msg) > 0) {
-        sprintf(temp_buf, "GRACZ %d\n", my_player_id + 1);
-        strcat(out_buf, temp_buf);
-        strcat(out_buf, "------------------------------------------------\n");
-        strcat(out_buf, last_server_msg);
-        strcat(out_buf, "\n------------------------------------------------\n");
+        char *text_copy = strdup(last_server_msg);
+        char *line = strtok(text_copy, "\n");
+        
+        sprintf(line_buf, "=== GRACZ %d ===\n", my_player_id + 1);
+        strcat(out_buf, line_buf);
+
+        while(line != NULL) {
+            strcat(out_buf, line);
+            strcat(out_buf, "\n");
+            line = strtok(NULL, "\n");
+        }
+        free(text_copy);
     } else {
         strcat(out_buf, "Oczekiwanie na dane z serwera...\n");
     }
 
-    strcat(out_buf, "\nKOMENDY: TRAIN [0-3] [ilosc] | ATTACK [L] [H] [C]\n");
+    strcat(out_buf, "------------------------------------------------\n");
+    strcat(out_buf, "KOMENDY: TRAIN [0-3] [ilosc] | ATTACK [L] [H] [C]\n");
     strcat(out_buf, "(0-Lekka, 1-Ciezka, 2-Jazda, 3-Robotnik)\n");
+    strcat(out_buf, "------------------------------------------------\n");
     
     strcat(out_buf, "\n> ");
-    strcat(out_buf, input_buffer);
-
+    strcat(out_buf, input_buffer); 
+    
+    strcat(out_buf, "\033[?25h"); 
+    
     write_stdout(out_buf);
 }
 
@@ -90,18 +105,18 @@ void handle_input() {
 
             memset(input_buffer, 0, 256);
             input_pos = 0;
-            redraw();
+            refresh_screen();
 
-        } else if (c == 127 || c == 8) {
+        } else if (c == 127 || c == 8) { 
             if (input_pos > 0) {
                 input_buffer[--input_pos] = '\0';
-                redraw();
+                refresh_screen();
             }
-        } else if (c >= 32 && c <= 126) {
+        } else if (c >= 32 && c <= 126) { 
             if (input_pos < 255) {
                 input_buffer[input_pos++] = c;
                 input_buffer[input_pos] = '\0';
-                redraw();
+                refresh_screen();
             }
         }
     }
@@ -110,8 +125,8 @@ void handle_input() {
 int main() {
     msg_id = msgget(KEY_MSG, 0666);
     if (msg_id == -1) {
-        const char *err = "Brak serwera\n";
-        write(STDERR_FILENO, err, strlen(err));
+        const char *e = "Brak serwera\n";
+        write(STDERR_FILENO, e, strlen(e));
         return 1;
     }
 
@@ -132,25 +147,25 @@ int main() {
     memset(last_server_msg, 0, MAX_TEXT);
     memset(input_buffer, 0, 256);
 
-    redraw();
+    refresh_screen();
 
     while(1) {
         if (msgrcv(msg_id, &msg, sizeof(Message)-sizeof(long), my_msg_type, IPC_NOWAIT) != -1) {
             if (msg.cmd == CMD_UPDATE) {
                 strcpy(last_server_msg, msg.text);
-                redraw();
+                refresh_screen();
             } else if (msg.cmd == CMD_RESULT) {
                 reset_terminal_mode();
-                char end_buf[512];
-                sprintf(end_buf, "\033[2J\033[H\n================================\nKONIEC GRY: %s\n================================\n", msg.text);
-                write_stdout(end_buf);
+                char buf[512];
+                sprintf(buf, "\033[2J\033[H\n=== KONIEC GRY ===\n%s\n\n", msg.text);
+                write_stdout(buf);
                 exit(0);
             }
         }
 
         struct timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = 10000;
+        tv.tv_usec = 20000; 
 
         fd_set fds;
         FD_ZERO(&fds);
@@ -160,8 +175,6 @@ int main() {
         if (ret > 0) {
             handle_input();
         }
-
-        usleep(10000); 
     }
     return 0;
 }
