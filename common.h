@@ -15,91 +15,74 @@
 #define MAX_PLAYERS 2
 #define WIN_THRESHOLD 5
 
-// Typy akcji
-#define ACTION_LOGIN 1
-#define ACTION_STATE 2
-#define ACTION_BUILD 3
-#define ACTION_ATTACK 4
+// Typy komunikatów (kanały)
+#define CHAN_SERVER 100
+#define CHAN_P1     101
+#define CHAN_P2     102
+
+// Akcje
+#define ACT_LOGIN  1
+#define ACT_STATE  2
+#define ACT_BUILD  3
+#define ACT_ATTACK 4
 
 typedef struct {
     int cost;
-    float attack_val;
-    float defense_val;
-    int build_time;
-    char name[32];
-} UnitData;
+    float atk;
+    float def;
+    int time;
+    char name[20];
+} Unit;
 
-static const UnitData UNIT_STATS[4] = {
-    {100, 1.0, 1.2, 2, "Lekka Piechota "},
+static const Unit STATS[4] = {
+    {100, 1.0, 1.2, 2, "Lekka Piechota"},
     {250, 1.5, 3.0, 3, "Ciezka Piechota"},
-    {550, 3.5, 1.2, 5, "Jazda          "},
-    {150, 0.0, 0.0, 2, "Robotnicy      "}
+    {550, 3.5, 1.2, 5, "Jazda         "},
+    {150, 0.0, 0.0, 2, "Robotnicy     "}
 };
 
 typedef struct {
     long mtype;
-    int player_id;
+    int sender_pid; // Uzywane tylko przy logowaniu
+    int player_id;  // 1 lub 2
     int action;
-    int unit_type;
-    int quantity;
-    int army_info[4];
-    int resource_info;
-    int score_info;
-    int game_status; 
-} GameMessage;
+    int u_type;
+    int u_count;
+    int army[4];
+    int gold;
+    int score;
+    int active;
+} Msg;
 
 typedef struct {
-    int player_resources[MAX_PLAYERS];
-    int player_army[MAX_PLAYERS][4];
-    int player_scores[MAX_PLAYERS];
-    int is_game_started;
-} SharedGameState;
+    int gold[MAX_PLAYERS];
+    int army[MAX_PLAYERS][4];
+    int score[MAX_PLAYERS];
+    int running;
+} GameData;
 
-union semun {
-    int val;
-    struct semid_ds *buf;
-    unsigned short *array;
-};
+union semun { int val; };
 
-// --- FUNKCJE POMOCNICZE I/O ---
+// --- POMOCNICZE FUNKCJE SYSTEMOWE ---
 
-static inline void write_str(int fd, const char *s) {
-    write(fd, s, strlen(s));
+static inline void print_s(const char *s) { write(STDOUT_FILENO, s, strlen(s)); }
+
+static inline void print_i(int n) {
+    if (n == 0) { write(STDOUT_FILENO, "0", 1); return; }
+    if (n < 0) { write(STDOUT_FILENO, "-", 1); n = -n; }
+    char b[12]; int i = 0;
+    while(n > 0) { b[i++] = (n % 10) + '0'; n /= 10; }
+    while(i > 0) write(STDOUT_FILENO, &b[--i], 1);
 }
 
-// Zamiana int na string (zamiast sprintf)
-static inline void write_int(int fd, int n) {
-    if (n == 0) { write(fd, "0", 1); return; }
-    if (n < 0) { write(fd, "-", 1); n = -n; }
-    char buf[12];
-    int i = 0;
-    while (n > 0) {
-        buf[i++] = (n % 10) + '0';
-        n /= 10;
-    }
-    while (i > 0) write(fd, &buf[--i], 1);
-}
-
-// Zamiana string na int (zamiast atoi)
-static inline int string_to_int(const char *s) {
+static inline int str_to_i(char *s) {
     int res = 0;
-    while (*s >= '0' && *s <= '9') {
-        res = res * 10 + (*s - '0');
-        s++;
-    }
+    while(*s >= '0' && *s <= '9') { res = res * 10 + (*s - '0'); s++; }
     return res;
 }
 
-// --- SEMAFORY ---
-
-static inline void lock_shm(int semid) {
-    struct sembuf op = {0, -1, SEM_UNDO};
-    semop(semid, &op, 1);
-}
-
-static inline void unlock_shm(int semid) {
-    struct sembuf op = {0, 1, SEM_UNDO};
-    semop(semid, &op, 1);
-}
+// JEDYNY SEMAFOR
+static inline void lock(int id) { struct sembuf o = {0, -1, SEM_UNDO}; semop(id, &o, 1); }
+static inline void unlock(int id) { struct sembuf o = {0, 1, SEM_UNDO}; semop(id, &o, 1); }
 
 #endif

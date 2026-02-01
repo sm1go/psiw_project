@@ -1,107 +1,83 @@
 #include "common.h"
 
-int my_player_id = 0;
-int msg_id;
+int my_id = 0;
+int mid;
 pid_t ui_pid;
 
-void handle_exit(int sig) {
-    if (ui_pid > 0) kill(ui_pid, SIGKILL);
-    exit(0);
-}
+void quit(int s) { if (ui_pid > 0) kill(ui_pid, SIGKILL); exit(0); }
 
-void run_ui() {
-    GameMessage m;
+void run_display() {
+    Msg m;
     while(1) {
-        m.mtype = 100;
-        m.player_id = getppid();
-        m.action = ACTION_STATE;
-        msgsnd(msg_id, &m, sizeof(GameMessage)-sizeof(long), 0);
-        // Odbieramy na kanale PID_RODZICA + 200
-        msgrcv(msg_id, &m, sizeof(GameMessage)-sizeof(long), getppid() + 200, 0);
+        m.mtype = CHAN_SERVER;
+        m.player_id = my_id;
+        m.action = ACT_STATE;
+        msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
+        msgrcv(mid, &m, sizeof(Msg)-sizeof(long), (my_id == 1) ? CHAN_P1 : CHAN_P2, 0);
 
-        write_str(STDOUT_FILENO, "\033[H\033[J"); 
-        write_str(STDOUT_FILENO, "============= GRA WOJENNA =============\n");
-        write_str(STDOUT_FILENO, "  ID GRACZA: "); write_int(STDOUT_FILENO, my_player_id);
-        write_str(STDOUT_FILENO, " | PUNKTY: "); write_int(STDOUT_FILENO, m.score_info);
-        write_str(STDOUT_FILENO, "\n---------------------------------------\n");
-        write_str(STDOUT_FILENO, "  Zloto: "); write_int(STDOUT_FILENO, m.resource_info);
-        write_str(STDOUT_FILENO, " | Status: "); write_str(STDOUT_FILENO, m.game_status ? "TRWA" : "CZEKANIE");
-        write_str(STDOUT_FILENO, "\n---------------------------------------\n");
+        print_s("\033[H\033[J"); // Clear
+        print_s("=== GRA STRATEGICZNA | GRACZ "); print_i(my_id); print_s(" ===\n");
+        print_s("Punkty: "); print_i(m.score); print_s("/"); print_i(WIN_THRESHOLD);
+        print_s(" | Zloto: "); print_i(m.gold); 
+        print_s(" | Status: "); print_s(m.active ? "GRA TRWA\n" : "CZEKANIE\n");
+        print_s("------------------------------------\n");
         for(int i=0; i<4; i++) {
-            write_str(STDOUT_FILENO, "  ["); write_int(STDOUT_FILENO, i); write_str(STDOUT_FILENO, "] ");
-            write_str(STDOUT_FILENO, UNIT_STATS[i].name); write_str(STDOUT_FILENO, ": ");
-            write_int(STDOUT_FILENO, m.army_info[i]); write_str(STDOUT_FILENO, "\n");
+            print_s("["); print_i(i); print_s("] "); print_s(STATS[i].name);
+            print_s(": "); print_i(m.army[i]); print_s("\n");
         }
-        write_str(STDOUT_FILENO, "---------------------------------------\n");
-        write_str(STDOUT_FILENO, "  1: Buduj | 2: Atakuj\n  Wybor: ");
+        print_s("------------------------------------\n");
+        print_s("1: Buduj | 2: Atakuj\nWybor: ");
 
-        if (m.score_info >= WIN_THRESHOLD) {
-            write_str(STDOUT_FILENO, "\n\n  *** WYGRANA! ***\n");
-            kill(getppid(), SIGINT);
-        } else if (m.score_info == -1) {
-            write_str(STDOUT_FILENO, "\n\n  *** PORAZKA! ***\n");
-            kill(getppid(), SIGINT);
-        }
+        if (m.score >= WIN_THRESHOLD) { print_s("\n\n*** WYGRANA! ***\n"); kill(getppid(), SIGINT); }
+        else if (m.score == -1) { print_s("\n\n*** PORAZKA! ***\n"); kill(getppid(), SIGINT); }
         sleep(1);
     }
 }
 
 int main() {
-    signal(SIGINT, handle_exit);
-    msg_id = msgget(PROJECT_KEY, 0600);
-    if (msg_id == -1) { write_str(2, "Blad: Brak serwera!\n"); return 1; }
+    signal(SIGINT, quit);
+    mid = msgget(PROJECT_KEY, 0600);
+    if (mid == -1) { print_s("Serwer nie dziala!\n"); return 1; }
 
-    GameMessage m;
-    m.mtype = 100;
-    m.player_id = getpid();
-    m.action = ACTION_LOGIN;
-    msgsnd(msg_id, &m, sizeof(GameMessage)-sizeof(long), 0);
-    msgrcv(msg_id, &m, sizeof(GameMessage)-sizeof(long), getpid(), 0);
+    Msg m;
+    m.mtype = CHAN_SERVER;
+    m.sender_pid = getpid();
+    m.action = ACT_LOGIN;
+    msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
+    msgrcv(mid, &m, sizeof(Msg)-sizeof(long), getpid(), 0);
 
-    if (m.player_id == -1) { write_str(2, "Brak miejsc!\n"); return 0; }
-    my_player_id = m.player_id;
+    if (m.player_id == -1) { print_s("Brak miejsc.\n"); return 0; }
+    my_id = m.player_id;
 
-    if ((ui_pid = fork()) == 0) {
-        run_ui();
-        exit(0);
-    }
+    if ((ui_pid = fork()) == 0) { run_display(); exit(0); }
 
-    char buf[32];
+    char b[32];
     while(1) {
-        int n = read(STDIN_FILENO, buf, 31);
+        int n = read(STDIN_FILENO, b, 31);
         if (n <= 0) continue;
-        buf[n-1] = '\0'; // Usuwamy znak nowej linii
-        int choice = string_to_int(buf);
+        b[n-1] = '\0';
+        int c = str_to_i(b);
 
-        if (choice == 1) {
+        if (c == 1) {
             kill(ui_pid, SIGSTOP);
-            write_str(STDOUT_FILENO, "\n[BUDOWA] Typ (0-3): ");
-            n = read(STDIN_FILENO, buf, 31); buf[n-1] = '\0';
-            int type = string_to_int(buf);
-            write_str(STDOUT_FILENO, "Ilosc: ");
-            n = read(STDIN_FILENO, buf, 31); buf[n-1] = '\0';
-            int qty = string_to_int(buf);
-
-            m.mtype = 100;
-            m.player_id = my_player_id;
-            m.action = ACTION_BUILD;
-            m.unit_type = type;
-            m.quantity = qty;
-            msgsnd(msg_id, &m, sizeof(GameMessage)-sizeof(long), 0);
+            print_s("\n[BUDOWA] Typ (0-3): "); n = read(STDIN_FILENO, b, 31); b[n-1] = '\0';
+            int t = str_to_i(b);
+            print_s("Ilosc: "); n = read(STDIN_FILENO, b, 31); b[n-1] = '\0';
+            int q = str_to_i(b);
+            m.mtype = CHAN_SERVER; m.player_id = my_id; m.action = ACT_BUILD;
+            m.u_type = t; m.u_count = q;
+            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
             kill(ui_pid, SIGCONT);
-        } 
-        else if (choice == 2) {
+        } else if (c == 2) {
             kill(ui_pid, SIGSTOP);
-            write_str(STDOUT_FILENO, "\n[ATAK] Podaj ilosci:\n");
-            m.mtype = 100;
-            m.player_id = my_player_id;
-            m.action = ACTION_ATTACK;
+            print_s("\n[ATAK] Podaj ilosci wojsk:\n");
+            m.mtype = CHAN_SERVER; m.player_id = my_id; m.action = ACT_ATTACK;
             for(int i=0; i<3; i++) {
-                write_str(STDOUT_FILENO, " "); write_str(STDOUT_FILENO, UNIT_STATS[i].name); write_str(STDOUT_FILENO, ": ");
-                n = read(STDIN_FILENO, buf, 31); buf[n-1] = '\0';
-                m.army_info[i] = string_to_int(buf);
+                print_s(" "); print_s(STATS[i].name); print_s(": ");
+                n = read(STDIN_FILENO, b, 31); b[n-1] = '\0';
+                m.army[i] = str_to_i(b);
             }
-            msgsnd(msg_id, &m, sizeof(GameMessage)-sizeof(long), 0);
+            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
             kill(ui_pid, SIGCONT);
         }
     }

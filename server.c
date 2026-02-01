@@ -1,145 +1,117 @@
 #include "common.h"
 
-int msg_id, shm_id, sem_id;
-SharedGameState *game_state;
+int mid, sid, semid;
+GameData *game;
 
-void shutdown_server(int sig) {
-    msgctl(msg_id, IPC_RMID, NULL);
-    shmctl(shm_id, IPC_RMID, NULL);
-    semctl(sem_id, 0, IPC_RMID);
-    write_str(STDOUT_FILENO, "\nSerwer wylaczony.\n");
+void cleanup(int s) {
+    msgctl(mid, IPC_RMID, NULL);
+    shmctl(sid, IPC_RMID, NULL);
+    semctl(semid, 0, IPC_RMID);
+    print_s("\n[SERWER] Zamknieto zasoby.\n");
     exit(0);
 }
 
 int main() {
-    signal(SIGINT, shutdown_server);
+    signal(SIGINT, cleanup);
     signal(SIGCHLD, SIG_IGN);
 
-    // Czyszczenie starych zasobów o tym samym kluczu przed startem
-    msg_id = msgget(PROJECT_KEY, 0600);
-    if (msg_id != -1) msgctl(msg_id, IPC_RMID, NULL);
+    mid = msgget(PROJECT_KEY, IPC_CREAT | 0600);
+    sid = shmget(PROJECT_KEY, sizeof(GameData), IPC_CREAT | 0600);
+    semid = semget(PROJECT_KEY, 1, IPC_CREAT | 0600);
+    
+    union semun a; a.val = 1;
+    semctl(semid, 0, SETVAL, a);
 
-    msg_id = msgget(PROJECT_KEY, IPC_CREAT | 0600);
-    shm_id = shmget(PROJECT_KEY, sizeof(SharedGameState), IPC_CREAT | 0600);
-    sem_id = semget(PROJECT_KEY, 1, IPC_CREAT | 0600);
+    game = (GameData*)shmat(sid, NULL, 0);
+    memset(game, 0, sizeof(GameData));
+    game->gold[0] = 300; game->gold[1] = 300;
 
-    union semun arg;
-    arg.val = 1;
-    semctl(sem_id, 0, SETVAL, arg);
+    print_s("[SERWER] Start... Czekam na graczy.\n");
 
-    game_state = (SharedGameState*)shmat(shm_id, NULL, 0);
-    memset(game_state, 0, sizeof(SharedGameState));
-    game_state->player_resources[0] = 300;
-    game_state->player_resources[1] = 300;
-
-    write_str(STDOUT_FILENO, "Serwer uruchomiony. Czekam na graczy...\n");
-
-    if (fork() == 0) { // Produkcja złota
+    if (fork() == 0) { // Zloto
         while(1) {
             sleep(1);
-            lock_shm(sem_id);
-            if (game_state->is_game_started) {
-                for(int i=0; i<2; i++) {
-                    game_state->player_resources[i] += 50 + (game_state->player_army[i][3] * 5);
-                }
+            lock(semid);
+            if (game->running) {
+                for(int i=0; i<2; i++) game->gold[i] += 50 + (game->army[i][3] * 5);
             }
-            unlock_shm(sem_id);
+            unlock(semid);
         }
     }
 
-    int players_ready = 0;
-    GameMessage msg;
-
+    int p_cnt = 0;
+    Msg m;
     while(1) {
-        // Serwer słucha na mtype = 100
-        if (msgrcv(msg_id, &msg, sizeof(GameMessage)-sizeof(long), 100, 0) == -1) continue;
+        if (msgrcv(mid, &m, sizeof(Msg)-sizeof(long), CHAN_SERVER, 0) == -1) continue;
 
-        if (msg.action == ACTION_LOGIN) {
-            lock_shm(sem_id);
-            long return_type = msg.player_id; // PID klienta
-            if (players_ready < 2) {
-                msg.player_id = ++players_ready;
-                if (players_ready == 2) game_state->is_game_started = 1;
-                write_str(STDOUT_FILENO, "Gracz zalogowany. ID: ");
-                write_int(STDOUT_FILENO, msg.player_id); write_str(STDOUT_FILENO, "\n");
-            } else msg.player_id = -1;
-            
-            msg.mtype = return_type;
-            msgsnd(msg_id, &msg, sizeof(GameMessage)-sizeof(long), 0);
-            unlock_shm(sem_id);
+        if (m.action == ACT_LOGIN) {
+            lock(semid);
+            long pid = m.sender_pid;
+            if (p_cnt < 2) {
+                m.player_id = ++p_cnt;
+                if (p_cnt == 2) game->running = 1;
+                print_s("Dolaczyl Gracz "); print_i(m.player_id); print_s("\n");
+            } else m.player_id = -1;
+            m.mtype = pid;
+            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
+            unlock(semid);
         } 
-        else if (msg.action == ACTION_STATE) {
-            int p = msg.player_id - 1;
-            lock_shm(sem_id);
-            msg.mtype = (long)msg.player_id + 200; // Unikalny kanał zwrotny dla stanu
-            msg.resource_info = game_state->player_resources[p];
-            msg.score_info = game_state->player_scores[p];
-            msg.game_status = game_state->is_game_started;
-            for(int i=0; i<4; i++) msg.army_info[i] = game_state->player_army[p][i];
-            
+        else if (m.action == ACT_STATE) {
+            int p = m.player_id - 1;
+            if (p < 0 || p >= 2) continue;
+            lock(semid);
+            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
+            m.gold = game->gold[p];
+            m.score = game->score[p];
+            m.active = game->running;
+            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
             int enemy = (p == 0) ? 1 : 0;
-            if (game_state->player_scores[enemy] >= WIN_THRESHOLD) msg.score_info = -1; 
-
-            msgsnd(msg_id, &msg, sizeof(GameMessage)-sizeof(long), 0);
-            unlock_shm(sem_id);
+            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1;
+            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
+            unlock(semid);
         }
-        else if (msg.action == ACTION_BUILD) {
-            int p = msg.player_id - 1;
-            int total_cost = UNIT_STATS[msg.unit_type].cost * msg.quantity;
-            lock_shm(sem_id);
-            if (game_state->player_resources[p] >= total_cost && msg.unit_type >= 0 && msg.unit_type <= 3) {
-                game_state->player_resources[p] -= total_cost;
-                unlock_shm(sem_id);
+        else if (m.action == ACT_BUILD) {
+            int p = m.player_id - 1;
+            int cost = STATS[m.u_type].cost * m.u_count;
+            lock(semid);
+            if (p >= 0 && game->gold[p] >= cost) {
+                game->gold[p] -= cost;
+                unlock(semid);
                 if (fork() == 0) {
-                    for(int i=0; i<msg.quantity; i++) {
-                        sleep(UNIT_STATS[msg.unit_type].build_time);
-                        lock_shm(sem_id);
-                        game_state->player_army[p][msg.unit_type]++;
-                        unlock_shm(sem_id);
+                    for(int i=0; i<m.u_count; i++) {
+                        sleep(STATS[m.u_type].time);
+                        lock(semid); game->army[p][m.u_type]++; unlock(semid);
                     }
                     exit(0);
                 }
-            } else unlock_shm(sem_id);
+            } else unlock(semid);
         }
-        else if (msg.action == ACTION_ATTACK) {
-            int p = msg.player_id - 1;
+        else if (m.action == ACT_ATTACK) {
+            int p = m.player_id - 1;
             int enemy = (p == 0) ? 1 : 0;
-            lock_shm(sem_id);
-            int can_go = 1;
-            for(int i=0; i<3; i++) if(game_state->player_army[p][i] < msg.army_info[i]) can_go = 0;
-
-            if(can_go) {
-                for(int i=0; i<3; i++) game_state->player_army[p][i] -= msg.army_info[i];
-                unlock_shm(sem_id);
-                if(fork() == 0) {
-                    int attackers[4];
-                    for(int i=0; i<4; i++) attackers[i] = msg.army_info[i];
-                    sleep(5); 
-                    lock_shm(sem_id);
-                    float SA = 0, SB = 0, ESA = 0, ESB = 0;
+            lock(semid);
+            int ok = 1;
+            for(int i=0; i<3; i++) if(game->army[p][i] < m.army[i]) ok = 0;
+            if (ok) {
+                for(int i=0; i<3; i++) game->army[p][i] -= m.army[i];
+                unlock(semid);
+                if (fork() == 0) {
+                    int atk[4]; for(int i=0; i<4; i++) atk[i] = m.army[i];
+                    sleep(5);
+                    lock(semid);
+                    float sa=0, sb=0, esa=0, esb=0;
                     for(int i=0; i<3; i++) {
-                        SA += attackers[i] * UNIT_STATS[i].attack_val;
-                        SB += game_state->player_army[enemy][i] * UNIT_STATS[i].defense_val;
-                        ESA += game_state->player_army[enemy][i] * UNIT_STATS[i].attack_val;
-                        ESB += attackers[i] * UNIT_STATS[i].defense_val;
+                        sa += atk[i] * STATS[i].atk; sb += game->army[enemy][i] * STATS[i].def;
+                        esa += game->army[enemy][i] * STATS[i].atk; esb += atk[i] * STATS[i].def;
                     }
-                    if (SA > SB) {
-                        game_state->player_scores[p]++;
-                        for(int i=0; i<3; i++) game_state->player_army[enemy][i] = 0;
-                    } else {
-                        float r = (SB > 0) ? SA/SB : 0;
-                        for(int i=0; i<3; i++) game_state->player_army[enemy][i] -= (int)(game_state->player_army[enemy][i] * r);
-                    }
-                    if (ESA > ESB) { for(int i=0; i<3; i++) attackers[i] = 0; }
-                    else {
-                        float r = (ESB > 0) ? ESA/ESB : 0;
-                        for(int i=0; i<3; i++) attackers[i] -= (int)(attackers[i] * r);
-                    }
-                    for(int i=0; i<3; i++) game_state->player_army[p][i] += attackers[i];
-                    unlock_shm(sem_id);
-                    exit(0);
+                    if (sa > sb) { game->score[p]++; for(int i=0; i<3; i++) game->army[enemy][i] = 0; }
+                    else { float r = (sb > 0) ? sa/sb : 0; for(int i=0; i<3; i++) game->army[enemy][i] -= (int)(game->army[enemy][i]*r); }
+                    if (esa > esb) { for(int i=0; i<3; i++) atk[i] = 0; }
+                    else { float r = (esb > 0) ? esa/esb : 0; for(int i=0; i<3; i++) atk[i] -= (int)(atk[i]*r); }
+                    for(int i=0; i<3; i++) game->army[p][i] += atk[i];
+                    unlock(semid); exit(0);
                 }
-            } else unlock_shm(sem_id);
+            } else unlock(semid);
         }
     }
 }
