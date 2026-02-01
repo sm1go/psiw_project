@@ -1,8 +1,6 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
@@ -10,67 +8,75 @@
 #include <sys/sem.h>
 #include <unistd.h>
 #include <signal.h>
-#include <time.h>
-#include <math.h>
+#include <stdlib.h>
 
-#define KEY_MSG 1234
-#define KEY_SHM 5678
-#define KEY_SEM 9012
+#define KEY_SHM 11111
+#define KEY_MSG 22222
+#define KEY_SEM 33333
 
-#define MAX_TEXT 512
+#define U_LIGHT 0
+#define U_HEAVY 1
+#define U_CAV 2
+#define U_WORK 3
 
-#define UNIT_LIGHT 0
-#define UNIT_HEAVY 1
-#define UNIT_CAVALRY 2
-#define UNIT_WORKER 3
-
-typedef struct {
+struct UnitStats {
     int cost;
-    double attack;
-    double defense;
+    int attack; 
+    int defense; 
     int time;
-} UnitStats;
-
-static const UnitStats UNITS[4] = {
-    {100, 1.0, 1.2, 2},
-    {250, 1.5, 3.0, 3},
-    {550, 3.5, 1.2, 5},
-    {150, 0.0, 0.0, 2}
 };
 
-typedef struct {
-    long type;
-    int source_id;
-    int cmd;
-    int args[5];
-    char text[MAX_TEXT];
-} Message;
-
-typedef struct {
-    int type;
+struct TrainTask {
+    int unit_type;
     int count;
-    int time_left;
-} ProductionTask;
+    int next_tick;
+    int active;
+};
 
-typedef struct {
-    int resources;
+struct Player {
+    int id;
+    int gold;
     int units[4];
-    int wins;
-    int workers_active;
-    ProductionTask production_queue[10];
-    int q_size;
-} Player;
+    struct TrainTask training;
+    int points;
+};
 
-typedef struct {
-    Player players[2];
-    int connected_clients;
-    int game_over;
-} GameState;
+struct Battle {
+    int active;
+    int tick_end;
+    int attacker_id;
+    int units[4];
+};
 
-#define CMD_LOGIN 1
-#define CMD_TRAIN 2
-#define CMD_ATTACK 3
-#define CMD_UPDATE 4
-#define CMD_RESULT 5
+struct CommandSlot {
+    int active;
+    int player_id;
+    char type; 
+    int u_type;
+    int count;
+};
+
+struct GameState {
+    long tick;
+    struct Player p1;
+    struct Player p2;
+    struct Battle battle;
+    struct CommandSlot cmd_slot;
+};
+
+struct MsgBuf {
+    long mtype;
+    int player_id;
+    char cmd_type;
+    int u_type;
+    int count;
+    char raw_text[100];
+};
+
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
 
 #endif
