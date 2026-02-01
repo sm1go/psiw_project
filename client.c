@@ -18,7 +18,8 @@ void receiver_loop() {
         }
         
         if (msg.cmd == CMD_UPDATE) {
-            printf("\033[s\033[?25l"); 
+            printf("\0337"); 
+            printf("\033[?25l"); 
 
             char buffer[MAX_TEXT];
             strcpy(buffer, msg.text);
@@ -26,18 +27,20 @@ void receiver_loop() {
             char* line = strtok(buffer, "\n");
             int row = 2;
             
-            printf("\033[1;1H\033[KGRACZ %d", my_player_id + 1);
+            print_line(1, "================= STATYSTYKI =================");
+            printf("\033[1;50HGRACZ %d", my_player_id + 1);
 
             while(line != NULL) {
                 print_line(row++, line);
                 line = strtok(NULL, "\n");
             }
             
-            print_line(row, "------------------------------------------------");
+            print_line(row, "----------------------------------------------");
             print_line(row+1, "KOMENDY: TRAIN [0-3] [ilosc] | ATTACK [L] [H] [C]");
             print_line(row+2, "(0-Lekka, 1-Ciezka, 2-Jazda, 3-Robotnik)");
-
-            printf("\033[u\033[?25h");
+            
+            printf("\0338"); 
+            printf("\033[?25h");
             fflush(stdout);
 
         } else if (msg.cmd == CMD_RESULT) {
@@ -52,6 +55,7 @@ void receiver_loop() {
 }
 
 int main() {
+    setbuf(stdout, NULL);
     msg_id = msgget(KEY_MSG, 0666);
     if (msg_id == -1) {
         perror("Brak serwera");
@@ -72,22 +76,22 @@ int main() {
     my_msg_type = 10 + my_player_id;
 
     printf("\033[2J");
-    for(int i=0; i<10; i++) printf("\n"); 
     
-    printf("Zalogowano jako Gracz %d\n", my_player_id + 1);
-
     if (fork() == 0) {
         receiver_loop();
     } else {
         char buffer[100];
         while(1) {
+            printf("\033[10;1H"); 
             printf("\033[K> "); 
             fflush(stdout);
             
             if (fgets(buffer, 100, stdin) == NULL) continue;
             buffer[strcspn(buffer, "\n")] = 0;
 
-            printf("\033[1A\033[K");
+            if (strlen(buffer) == 0) continue;
+
+            printf("\033[11;1H\033[KOstatnia komenda: %s", buffer);
 
             char cmd_str[10];
             int a, b, c;
