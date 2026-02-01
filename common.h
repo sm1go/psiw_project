@@ -13,12 +13,14 @@
 #include <signal.h>
 #include <time.h>
 #include <math.h>
+#include <sys/select.h>
+#include <termios.h>
 
 #define KEY_MSG 1234
 #define KEY_SHM 5678
 #define KEY_SEM 9012
 
-#define MAX_TEXT 256
+#define MAX_TEXT 512
 
 #define UNIT_LIGHT 0
 #define UNIT_HEAVY 1
