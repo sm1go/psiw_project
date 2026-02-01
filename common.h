@@ -9,75 +9,49 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
-#include <fcntl.h>
 
-#define KEY_SHM 12345
-#define KEY_MSG 12346
-#define KEY_SEM 12347
+#define KLUCZ 12345
+#define SHM_KLUCZ 12346
+#define SEM_KLUCZ 12347
 
-#define U_LIGHT 0
-#define U_HEAVY 1
-#define U_CAV 2
-#define U_WORK 3
+#define MSG_LOGOWANIE 10
+#define MSG_BUDUJ     11
+#define MSG_ATAK      12
+#define MSG_STAN      13
+#define MSG_START     15
 
-struct UnitStats {
-    int cost;
-    int attack; 
-    int defense; 
-    int time;
-};
-
-struct TrainTask {
-    int unit_type;
-    int count;
-    int next_tick;
-    int active;
-};
-
-struct Player {
-    int id;
-    int gold;
-    int units[4];
-    struct TrainTask training;
-    int points;
-};
-
-struct Battle {
-    int active;
-    int tick_end;
-    int attacker_id;
-    int units[4];
-};
-
-struct CommandSlot {
-    int active;
-    int player_id;
-    char type; 
-    int u_type;
-    int count;
-};
-
-struct GameState {
-    long tick;
-    struct Player p1;
-    struct Player p2;
-    struct Battle battle;
-    struct CommandSlot cmd_slot;
-};
-
-struct MsgBuf {
+// Struktura komunikatu MQ
+typedef struct {
     long mtype;
-    int player_id;
-    char cmd_type;
-    int u_type;
-    int count;
-    char raw_text[100];
-};
+    int id_gracza;
+    int wybor;
+    int jednostki[4]; // 0:Lekka, 1:Ciezka, 2:Jazda, 3:Robotnicy
+    int zasoby;
+    int punkty;
+} MsgBuf;
 
-union semun {
-    int val;
-    struct semid_ds *buf;
-    unsigned short *array;
-};
+// Stan pojedynczego gracza w pamieci wspoldzielonej
+typedef struct {
+    int active;
+    int resources;
+    int units[4];
+    int training_type;   // -1 jesli brak
+    int training_count;
+    int training_time_left;
+    int points;
+    int is_attacking;
+    int att_units[4];
+    int att_time_left;
+} PlayerState;
+
+typedef struct {
+    PlayerState p[2];
+} GameState;
+
+// Statystyki (wartosci * 10 dla unikniecia float zgodnie z plikami)
+static const int COSTS[] = {100, 250, 550, 150};
+static const int TIMES[] = {2, 3, 5, 2};
+static const int ATK_VAL[] = {10, 15, 35, 0}; // x10
+static const int DEF_VAL[] = {12, 30, 12, 0}; // x10
 
 #endif
