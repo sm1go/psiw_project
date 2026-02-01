@@ -15,12 +15,11 @@
 #define MAX_PLAYERS 2
 #define WIN_THRESHOLD 5
 
-// Typy komunikatów
-#define TYPE_SERVER 1
-#define ACTION_LOGIN 10
-#define ACTION_STATE 11
-#define ACTION_BUILD 12
-#define ACTION_ATTACK 13
+// Typy akcji
+#define ACTION_LOGIN 1
+#define ACTION_STATE 2
+#define ACTION_BUILD 3
+#define ACTION_ATTACK 4
 
 typedef struct {
     int cost;
@@ -62,22 +61,36 @@ union semun {
     unsigned short *array;
 };
 
-// Funkcje pomocnicze do niskopoziomowego zapisu (zamiast printf/sprintf)
+// --- FUNKCJE POMOCNICZE I/O ---
+
 static inline void write_str(int fd, const char *s) {
     write(fd, s, strlen(s));
 }
 
+// Zamiana int na string (zamiast sprintf)
 static inline void write_int(int fd, int n) {
-    char buf[12];
-    int i = 0;
     if (n == 0) { write(fd, "0", 1); return; }
     if (n < 0) { write(fd, "-", 1); n = -n; }
+    char buf[12];
+    int i = 0;
     while (n > 0) {
         buf[i++] = (n % 10) + '0';
         n /= 10;
     }
     while (i > 0) write(fd, &buf[--i], 1);
 }
+
+// Zamiana string na int (zamiast atoi)
+static inline int string_to_int(const char *s) {
+    int res = 0;
+    while (*s >= '0' && *s <= '9') {
+        res = res * 10 + (*s - '0');
+        s++;
+    }
+    return res;
+}
+
+// --- SEMAFORY ---
 
 static inline void lock_shm(int semid) {
     struct sembuf op = {0, -1, SEM_UNDO};
