@@ -1,213 +1,210 @@
 #include "common.h"
 
-int shmid, semid, msgid;
-struct GameState *game;
+int shm_id, sem_id, msg_id;
+GameState *game;
 
-struct UnitStats stats[4] = {
-    {100, 1.0, 1.2, 2},
-    {250, 1.5, 3.0, 3},
-    {550, 3.5, 1.2, 5},
-    {150, 0.0, 0.0, 2}
-};
-
-void sem_lock(int semid) {
-    struct sembuf sb = {0, -1, 0};
-    semop(semid, &sb, 1);
-}
-
-void sem_unlock(int semid) {
-    struct sembuf sb = {0, 1, 0};
-    semop(semid, &sb, 1);
-}
-
-void clean_exit(int sig) {
+void cleanup(int sig) {
     shmdt(game);
-    shmctl(shmid, IPC_RMID, 0);
-    semctl(semid, 0, IPC_RMID);
-    msgctl(msgid, IPC_RMID, 0);
+    shmctl(shm_id, IPC_RMID, NULL);
+    semctl(sem_id, 0, IPC_RMID);
+    msgctl(msg_id, IPC_RMID, NULL);
     exit(0);
 }
 
-void process_production(struct PlayerState *p) {
-    for(int i=0; i<4; i++) {
-        if(p->production_queue[i] > 0) {
-            p->production_timer[i]--;
-            if(p->production_timer[i] <= 0) {
-                p->units[i]++;
-                p->production_queue[i]--;
-                if(p->production_queue[i] > 0) {
-                    p->production_timer[i] = stats[i].build_time;
-                } else {
-                    p->production_timer[i] = 0;
-                }
-            }
+void semaphore_op(int op) {
+    struct sembuf sb;
+    sb.sem_num = 0;
+    sb.sem_op = op;
+    sb.sem_flg = 0;
+    semop(sem_id, &sb, 1);
+}
+
+void send_end_game(int winner_id) {
+    Message msg;
+    msg.cmd = CMD_RESULT;
+    game->game_over = 1;
+
+    for(int i=0; i<2; i++) {
+        msg.type = 10 + i;
+        if (i == winner_id) {
+            sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
+        } else {
+            sprintf(msg.text, "PORAZKA! PRZECIWNIK ZDOBYL 5 PUNKTOW.");
         }
-    }
-    int workers = p->units[3];
-    p->resources += 50 + (workers * 5);
-}
-
-// Funkcja pomocnicza do ukrywania danych wroga
-void mask_enemy_state(struct PlayerState *dest, struct PlayerState *src) {
-    dest->id = src->id;
-    dest->victory_points = src->victory_points; // To zostawiamy jawne
-    
-    // Ukrywamy reszte
-    dest->resources = 0;
-    for(int i=0; i<4; i++) {
-        dest->units[i] = 0; 
-        dest->production_queue[i] = 0;
-        dest->production_timer[i] = 0;
+        msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
     }
 }
 
-void timer_handler(int sig) {
-    sem_lock(semid);
+void send_update() {
+    Message msg;
+    msg.cmd = CMD_UPDATE;
     
-    process_production(&game->p1);
-    process_production(&game->p2);
-
-    struct UpdateMsg msg1, msg2;
-    
-    // Przygotowanie wiadomosci dla Gracza 1
-    msg1.mtype = 10; 
-    msg1.self = game->p1;
-    mask_enemy_state(&msg1.enemy, &game->p2); // Ukryj dane gracza 2
-    for(int i=0; i<100; i++) msg1.message[i] = game->last_event_msg[i];
-    
-    // Przygotowanie wiadomosci dla Gracza 2
-    msg2.mtype = 20;
-    msg2.self = game->p2;
-    mask_enemy_state(&msg2.enemy, &game->p1); // Ukryj dane gracza 1
-    for(int i=0; i<100; i++) msg2.message[i] = game->last_event_msg[i];
-
-    // Czyszczenie wiadomosci po wyslaniu
-    if(my_strlen(game->last_event_msg) > 0) {
-        game->last_event_msg[0] = '\0';
+    for(int i=0; i<2; i++) {
+        msg.type = 10 + i;
+        sprintf(msg.text, "ZASOBY: %d | ROB: %d | WIN: %d\nARMIA: L:%d C:%d J:%d\nPRODUKCJA: %d zadan", 
+            game->players[i].resources, 
+            game->players[i].units[UNIT_WORKER], 
+            game->players[i].wins,
+            game->players[i].units[UNIT_LIGHT],
+            game->players[i].units[UNIT_HEAVY],
+            game->players[i].units[UNIT_CAVALRY],
+            game->players[i].q_size);
+        msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), IPC_NOWAIT);
     }
-
-    msgsnd(msgid, &msg1, sizeof(struct UpdateMsg) - sizeof(long), IPC_NOWAIT);
-    msgsnd(msgid, &msg2, sizeof(struct UpdateMsg) - sizeof(long), IPC_NOWAIT);
-
-    sem_unlock(semid);
-    alarm(1);
 }
 
-void handle_attack(int attacker_id, int u0, int u1, int u2) {
-    struct PlayerState *att, *def;
-    if(attacker_id == 1) { att = &game->p1; def = &game->p2; }
-    else { att = &game->p2; def = &game->p1; }
+void resolve_attack(int attacker_id, int units_sent[3]) {
+    int defender_id = (attacker_id == 0) ? 1 : 0;
+    
+    double attack_power = 
+        units_sent[UNIT_LIGHT] * UNITS[UNIT_LIGHT].attack +
+        units_sent[UNIT_HEAVY] * UNITS[UNIT_HEAVY].attack +
+        units_sent[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].attack;
 
-    if(att->units[0] < u0 || att->units[1] < u1 || att->units[2] < u2) {
-        return; 
-    }
+    double defense_power = 
+        game->players[defender_id].units[UNIT_LIGHT] * UNITS[UNIT_LIGHT].defense +
+        game->players[defender_id].units[UNIT_HEAVY] * UNITS[UNIT_HEAVY].defense +
+        game->players[defender_id].units[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].defense;
 
-    float attack_power = u0 * stats[0].attack + u1 * stats[1].attack + u2 * stats[2].attack;
-    float defense_power = def->units[0] * stats[0].defense + 
-                          def->units[1] * stats[1].defense + 
-                          def->units[2] * stats[2].defense +
-                          def->units[3] * stats[3].defense; 
+    if (defense_power == 0) defense_power = 0.1;
 
-    if(attack_power > defense_power) {
-        att->victory_points++;
-        for(int i=0; i<4; i++) def->units[i] = 0;
-        
-        char *msg = (attacker_id == 1) ? "Bitwa: Gracz 1 wygral!" : "Bitwa: Gracz 2 wygral!";
-        int k=0; while(msg[k]) { game->last_event_msg[k] = msg[k]; k++; } game->last_event_msg[k] = 0;
+    if (attack_power > defense_power) {
+        game->players[attacker_id].wins++;
+        for(int u=0; u<3; u++) game->players[defender_id].units[u] = 0;
+
+        if (game->players[attacker_id].wins >= 5) {
+            send_end_game(attacker_id);
+        }
 
     } else {
-        for(int i=0; i<4; i++) {
-            if(def->units[i] > 0) {
-                int lost = (int)(def->units[i] * (attack_power / defense_power));
-                def->units[i] -= lost;
-                if(def->units[i] < 0) def->units[i] = 0;
-            }
+        double ratio_def = attack_power / defense_power;
+        for(int u=0; u<3; u++) {
+            int lost = floor(game->players[defender_id].units[u] * ratio_def);
+            game->players[defender_id].units[u] -= lost;
         }
-        char *msg = "Bitwa: Atak odparty!";
-        int k=0; while(msg[k]) { game->last_event_msg[k] = msg[k]; k++; } game->last_event_msg[k] = 0;
     }
 
-    float counter_att = def->units[0] * stats[0].attack + def->units[1] * stats[1].attack + def->units[2] * stats[2].attack; 
-    float counter_def = u0 * stats[0].defense + u1 * stats[1].defense + u2 * stats[2].defense;
-
-    if(counter_att > counter_def) {
-         att->units[0] -= u0;
-         att->units[1] -= u1;
-         att->units[2] -= u2;
-    } else {
-        int lost0 = (int)(u0 * (counter_att / counter_def));
-        int lost1 = (int)(u1 * (counter_att / counter_def));
-        int lost2 = (int)(u2 * (counter_att / counter_def));
+    double defender_attack = 
+        game->players[defender_id].units[UNIT_LIGHT] * UNITS[UNIT_LIGHT].attack +
+        game->players[defender_id].units[UNIT_HEAVY] * UNITS[UNIT_HEAVY].attack +
+        game->players[defender_id].units[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].attack;
         
-        att->units[0] -= lost0;
-        att->units[1] -= lost1;
-        att->units[2] -= lost2;
-    }
+    double attacker_defense = 
+        units_sent[UNIT_LIGHT] * UNITS[UNIT_LIGHT].defense +
+        units_sent[UNIT_HEAVY] * UNITS[UNIT_HEAVY].defense +
+        units_sent[UNIT_CAVALRY] * UNITS[UNIT_CAVALRY].defense;
 
-    if(att->victory_points >= 5) {
-        char *win = (attacker_id == 1) ? "KONIEC: WYGRAL GRACZ 1" : "KONIEC: WYGRAL GRACZ 2";
-        int k=0; while(win[k]) { game->last_event_msg[k] = win[k]; k++; } game->last_event_msg[k] = 0;
+    if (attacker_defense == 0) attacker_defense = 0.1;
+
+    double ratio_atk = defender_attack / attacker_defense;
+    if (ratio_atk > 1.0) ratio_atk = 1.0;
+
+    for(int u=0; u<3; u++) {
+        int lost = floor(units_sent[u] * ratio_atk);
+        int returning = units_sent[u] - lost;
+        game->players[attacker_id].units[u] += returning;
     }
 }
 
 int main() {
-    signal(SIGINT, clean_exit);
+    signal(SIGINT, cleanup);
 
-    shmid = shmget(KEY_SHM, sizeof(struct GameState), IPC_CREAT | 0666);
-    game = (struct GameState*)shmat(shmid, NULL, 0);
+    shm_id = shmget(KEY_SHM, sizeof(GameState), IPC_CREAT | 0666);
+    game = (GameState*)shmat(shm_id, NULL, 0);
+    
+    sem_id = semget(KEY_SEM, 1, IPC_CREAT | 0666);
+    semctl(sem_id, 0, SETVAL, 1);
 
-    msgid = msgget(KEY_MSG, IPC_CREAT | 0666);
-    semid = semget(KEY_SEM, 1, IPC_CREAT | 0666);
+    msg_id = msgget(KEY_MSG, IPC_CREAT | 0666);
 
-    union semun arg;
-    arg.val = 1;
-    semctl(semid, 0, SETVAL, arg);
+    memset(game, 0, sizeof(GameState));
+    game->players[0].resources = 300;
+    game->players[1].resources = 300;
 
-    game->connected_clients = 0;
-    game->p1.id = 1; game->p1.resources = 300; game->p1.victory_points = 0;
-    game->p2.id = 2; game->p2.resources = 300; game->p2.victory_points = 0;
-    for(int i=0;i<4;i++) {
-        game->p1.units[i]=0; game->p1.production_queue[i]=0;
-        game->p2.units[i]=0; game->p2.production_queue[i]=0;
-    }
-
-    if(fork() == 0) {
-        signal(SIGALRM, timer_handler);
-        alarm(1);
+    if (fork() == 0) {
         while(1) {
-            pause();
-        }
-    }
-
-    struct MsgBuf req;
-    while(1) {
-        if(msgrcv(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0, 0) == -1) {
-            if(game->p1.victory_points >= 5 || game->p2.victory_points >= 5) break;
-            continue;
-        }
-
-        sem_lock(semid);
-
-        if(req.mtype == MSG_TYPE_LOGIN) {
-            game->connected_clients++;
-        }
-        else if(req.command == 1) { 
-            struct PlayerState *p = (req.player_id == 1) ? &game->p1 : &game->p2;
-            int cost = stats[req.unit_type].cost * req.count;
-            if(p->resources >= cost) {
-                p->resources -= cost;
-                if(p->production_queue[req.unit_type] == 0) {
-                    p->production_timer[req.unit_type] = stats[req.unit_type].build_time;
-                }
-                p->production_queue[req.unit_type] += req.count;
+            sleep(1);
+            semaphore_op(-1);
+            
+            if (game->game_over) {
+                semaphore_op(1);
+                exit(0);
             }
-        }
-        else if(req.command == 2) { 
-            handle_attack(req.player_id, req.units_to_attack[0], req.units_to_attack[1], req.units_to_attack[2]);
-        }
 
-        sem_unlock(semid);
+            for(int i=0; i<2; i++) {
+                game->players[i].resources += 50 + (game->players[i].units[UNIT_WORKER] * 5);
+                
+                if (game->players[i].q_size > 0) {
+                    game->players[i].production_queue[0].time_left--;
+                    if (game->players[i].production_queue[0].time_left <= 0) {
+                        int type = game->players[i].production_queue[0].type;
+                        int count = game->players[i].production_queue[0].count;
+                        game->players[i].units[type] += count;
+                        
+                        for(int k=0; k < game->players[i].q_size - 1; k++) {
+                            game->players[i].production_queue[k] = game->players[i].production_queue[k+1];
+                        }
+                        game->players[i].q_size--;
+                    }
+                }
+            }
+            send_update();
+            semaphore_op(1);
+        }
+    } else {
+        Message msg;
+        while(1) {
+            msgrcv(msg_id, &msg, sizeof(Message)-sizeof(long), 1, 0);
+            
+            semaphore_op(-1);
+
+            if (game->game_over) {
+                semaphore_op(1);
+                break;
+            }
+
+            if (msg.cmd == CMD_LOGIN) {
+                if (game->connected_clients < 2) {
+                    msg.type = msg.source_id; 
+                    msg.args[0] = game->connected_clients;
+                    game->connected_clients++;
+                    msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
+                }
+            } else if (msg.cmd == CMD_TRAIN) {
+                int p_idx = msg.args[0];
+                int type = msg.args[1];
+                int count = msg.args[2];
+                int cost = UNITS[type].cost * count;
+                
+                if (game->players[p_idx].resources >= cost && game->players[p_idx].q_size < 10) {
+                    game->players[p_idx].resources -= cost;
+                    int q = game->players[p_idx].q_size;
+                    game->players[p_idx].production_queue[q].type = type;
+                    game->players[p_idx].production_queue[q].count = count;
+                    game->players[p_idx].production_queue[q].time_left = UNITS[type].time;
+                    game->players[p_idx].q_size++;
+                }
+            } else if (msg.cmd == CMD_ATTACK) {
+                int p_idx = msg.args[0];
+                int l = msg.args[1];
+                int h = msg.args[2];
+                int c = msg.args[3];
+                
+                if (game->players[p_idx].units[UNIT_LIGHT] >= l &&
+                    game->players[p_idx].units[UNIT_HEAVY] >= h &&
+                    game->players[p_idx].units[UNIT_CAVALRY] >= c) {
+                        
+                    game->players[p_idx].units[UNIT_LIGHT] -= l;
+                    game->players[p_idx].units[UNIT_HEAVY] -= h;
+                    game->players[p_idx].units[UNIT_CAVALRY] -= c;
+                    
+                    int sent[3] = {l, h, c};
+                    sleep(5); 
+                    resolve_attack(p_idx, sent);
+                }
+            }
+            semaphore_op(1);
+        }
     }
-
     return 0;
 }

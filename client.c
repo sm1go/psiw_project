@@ -1,124 +1,80 @@
 #include "common.h"
 
-int msgid;
-int player_id;
+int msg_id;
+int my_player_id = -1; 
+int my_msg_type = -1;
 
-// Funkcja wyswietlajaca uzywa sekwencji ANSI:
-// \033[s - zapisz pozycje kursora (tam gdzie uzytkownik pisze)
-// \033[H - przesun kursor na gore ekranu
-// \033[K - wyczysc linie (zeby usunac stare smieci jesli nowa linia jest krotsza)
-// \033[u - przywroc kursor na dol
-void display_state(struct UpdateMsg *msg) {
-    my_print("\033[s\033[H"); // Save cursor & Move Home
-
-    my_print("=== GRA STRATEGICZNA ===\033[K\n");
-    my_print("Gracz: "); my_print_int(player_id); my_print("\033[K\n");
-    my_print("Zasoby: "); my_print_int(msg->self.resources); my_print("\033[K\n");
-    my_print("Punkty Zwyciestwa: "); my_print_int(msg->self.victory_points); my_print(" / 5\033[K\n");
-    my_print("------------------------\033[K\n");
-    my_print("TWOJE JEDNOSTKI:\033[K\n");
-    
-    my_print("0. Lekka P. : "); my_print_int(msg->self.units[0]); 
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[0]); my_print(")\033[K\n");
-    
-    my_print("1. Ciezka P.: "); my_print_int(msg->self.units[1]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[1]); my_print(")\033[K\n");
-    
-    my_print("2. Jazda    : "); my_print_int(msg->self.units[2]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[2]); my_print(")\033[K\n");
-    
-    my_print("3. Robotnicy: "); my_print_int(msg->self.units[3]);
-    my_print(" (W prod: "); my_print_int(msg->self.production_queue[3]); my_print(")\033[K\n");
-    
-    my_print("------------------------\033[K\n");
-    my_print("PRZECIWNIK:\033[K\n");
-    // Tutaj nie wyswietlamy juz jednostek wroga
-    my_print("Punkty Wroga: "); my_print_int(msg->enemy.victory_points); my_print("\033[K\n");
-    my_print("------------------------\033[K\n");
-    
-    if(my_strlen(msg->message) > 0) {
-        my_print("KOMUNIKAT: "); my_print(msg->message); my_print("\033[K\n");
-    } else {
-        my_print("\033[K\n"); // Pusta linia, czyszczenie starego komunikatu
-    }
-    
-    my_print("------------------------\033[K\n");
-    my_print("KOMENDY: [t typ ilosc] (trenuj), [a u0 u1 u2] (atak)\033[K\n");
-    // Nie piszemy promptu ">" tutaj, bo jest on na dole ekranu
-
-    my_print("\033[u"); // Restore cursor
-}
-
-void receiver_process() {
-    struct UpdateMsg msg;
-    long type = (player_id == 1) ? 10 : 20;
+void receiver_loop() {
+    Message msg;
     while(1) {
-        if(msgrcv(msgid, &msg, sizeof(struct UpdateMsg) - sizeof(long), type, 0) != -1) {
-            display_state(&msg);
-            if(my_strlen(msg.message) >= 6 && msg.message[0] == 'K' && msg.message[1] == 'O') {
-                exit(0);
-            }
+        if (msgrcv(msg_id, &msg, sizeof(Message)-sizeof(long), my_msg_type, 0) == -1) {
+            exit(1);
+        }
+        if (msg.cmd == CMD_UPDATE) {
+            printf("\033[2J\033[H"); 
+            printf("GRACZ %d | %s\n", my_player_id + 1, msg.text);
+            printf("KOMENDY: TRAIN [0-3] [ilosc] | ATTACK [L] [H] [C]\n");
+            printf("(0-Lekka, 1-Ciezka, 2-Jazda, 3-Robotnik)\n> ");
+            fflush(stdout);
+        } else if (msg.cmd == CMD_RESULT) {
+            printf("\033[2J\033[H");
+            printf("\n\n================================\n");
+            printf("KONIEC GRY: %s\n", msg.text);
+            printf("================================\n\n");
+            kill(getppid(), SIGKILL);
+            exit(0);
         }
     }
 }
 
-int main(int argc, char *argv[]) {
-    if(argc < 2) {
-        my_print("Uzycie: ./client [1 lub 2]\n");
+int main() {
+    msg_id = msgget(KEY_MSG, 0666);
+    if (msg_id == -1) {
+        perror("Brak serwera");
         return 1;
     }
-    player_id = my_atoi(argv[1]);
-    msgid = msgget(KEY_MSG, 0666);
+
+    srand(time(NULL) ^ getpid());
+    int temp_key = rand() % 1000 + 50;
     
-    // Inicjalizacja ekranu - wyczyszczenie i zrobienie miejsca
-    my_print("\033[2J\033[H");
-    for(int i=0; i<16; i++) my_print("\n"); // Zrob miejsce na interfejs
-    my_print("> "); // Prompt na dole
+    Message msg;
+    msg.type = 1;
+    msg.cmd = CMD_LOGIN;
+    msg.source_id = temp_key;
+    msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
 
-    struct MsgBuf login;
-    login.mtype = MSG_TYPE_LOGIN;
-    login.player_id = player_id;
-    msgsnd(msgid, &login, sizeof(struct MsgBuf) - sizeof(long), 0);
+    msgrcv(msg_id, &msg, sizeof(Message)-sizeof(long), temp_key, 0);
+    my_player_id = msg.args[0];
+    my_msg_type = 10 + my_player_id;
 
-    if(fork() == 0) {
-        receiver_process();
+    printf("Zalogowano jako Gracz %d\n", my_player_id + 1);
+
+    if (fork() == 0) {
+        receiver_loop();
     } else {
-        char buf[50];
+        char buffer[100];
         while(1) {
-            int n = read(0, buf, 50);
-            if(n > 0) {
-                buf[n] = '\0';
-                struct MsgBuf req;
-                req.mtype = player_id; 
-                req.player_id = player_id;
+            fgets(buffer, 100, stdin);
+            char cmd_str[10];
+            int a, b, c;
+            
+            if (sscanf(buffer, "%s %d %d %d", cmd_str, &a, &b, &c) >= 2) {
+                msg.type = 1; 
+                msg.source_id = getpid();
+                msg.args[0] = my_player_id;
 
-                if(buf[0] == 't') {
-                    req.command = 1;
-                    req.unit_type = buf[2] - '0';
-                    char num_buf[10];
-                    int k=0;
-                    for(int i=4; i<n && buf[i]>='0' && buf[i]<='9'; i++) {
-                        num_buf[k++] = buf[i];
-                    }
-                    num_buf[k] = '\0';
-                    req.count = my_atoi(num_buf);
-                    msgsnd(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0);
+                if (strcmp(cmd_str, "TRAIN") == 0) {
+                    msg.cmd = CMD_TRAIN;
+                    msg.args[1] = a; 
+                    msg.args[2] = b; 
+                    msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
+                } else if (strcmp(cmd_str, "ATTACK") == 0) {
+                    msg.cmd = CMD_ATTACK;
+                    msg.args[1] = a; 
+                    msg.args[2] = b; 
+                    msg.args[3] = c; 
+                    msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
                 }
-                else if(buf[0] == 'a') {
-                    req.command = 2;
-                    char u0[5], u1[5], u2[5];
-                    int idx = 2, k=0;
-                    while(buf[idx] != ' ' && idx < n) u0[k++] = buf[idx++]; u0[k] = '\0'; idx++; k=0;
-                    while(buf[idx] != ' ' && idx < n) u1[k++] = buf[idx++]; u1[k] = '\0'; idx++; k=0;
-                    while(buf[idx] != ' ' && buf[idx] != '\n' && idx < n) u2[k++] = buf[idx++]; u2[k] = '\0';
-                    
-                    req.units_to_attack[0] = my_atoi(u0);
-                    req.units_to_attack[1] = my_atoi(u1);
-                    req.units_to_attack[2] = my_atoi(u2);
-                    msgsnd(msgid, &req, sizeof(struct MsgBuf) - sizeof(long), 0);
-                }
-                // Po wpisaniu komendy wypisz znowu prompt, zeby bylo ladnie
-                my_print("> ");
             }
         }
     }
