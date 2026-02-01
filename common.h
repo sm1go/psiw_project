@@ -8,37 +8,29 @@
 #include <sys/msg.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <signal.h>
 
-#define KEY 12345
+#define PROJECT_KEY 12345
 #define MAX_PLAYERS 2
-#define WIN_POINTS 5
+#define WIN_THRESHOLD 5
 
-// Message Types
-#define M_LOGIN    10
-#define M_STATE    11
-#define M_BUILD    12
-#define M_ATTACK   13
-#define M_RESULT   14
-
-// Unit Indices
-#define LIGHT_INF  0
-#define HEAVY_INF  1
-#define CAVALRY    2
-#define WORKER     3
+// Typy komunikatów
+#define TYPE_SERVER 1
+#define ACTION_LOGIN 10
+#define ACTION_STATE 11
+#define ACTION_BUILD 12
+#define ACTION_ATTACK 13
 
 typedef struct {
-    int price;
-    float attack;
-    float defense;
+    int cost;
+    float attack_val;
+    float defense_val;
     int build_time;
     char name[32];
-} UnitStats;
+} UnitData;
 
-// Statystyki jednostek zgodnie z tabelą
-static const UnitStats UNITS[4] = {
+static const UnitData UNIT_STATS[4] = {
     {100, 1.0, 1.2, 2, "Lekka Piechota "},
     {250, 1.5, 3.0, 3, "Ciezka Piechota"},
     {550, 3.5, 1.2, 5, "Jazda          "},
@@ -48,21 +40,21 @@ static const UnitStats UNITS[4] = {
 typedef struct {
     long mtype;
     int player_id;
-    int action_type;
-    int unit_idx;
-    int count;
-    int army[4];
-    int resources;
-    int points;
-    int status; 
-} GameMsg;
+    int action;
+    int unit_type;
+    int quantity;
+    int army_info[4];
+    int resource_info;
+    int score_info;
+    int game_status; 
+} GameMessage;
 
 typedef struct {
-    int resources[MAX_PLAYERS];
-    int army[MAX_PLAYERS][4];
-    int points[MAX_PLAYERS];
-    int game_active;
-} GameState;
+    int player_resources[MAX_PLAYERS];
+    int player_army[MAX_PLAYERS][4];
+    int player_scores[MAX_PLAYERS];
+    int is_game_started;
+} SharedGameState;
 
 union semun {
     int val;
@@ -70,13 +62,29 @@ union semun {
     unsigned short *array;
 };
 
-// Funkcje pomocnicze dla jedynego semafora
-static inline void lock_sync(int semid) {
+// Funkcje pomocnicze do niskopoziomowego zapisu (zamiast printf/sprintf)
+static inline void write_str(int fd, const char *s) {
+    write(fd, s, strlen(s));
+}
+
+static inline void write_int(int fd, int n) {
+    char buf[12];
+    int i = 0;
+    if (n == 0) { write(fd, "0", 1); return; }
+    if (n < 0) { write(fd, "-", 1); n = -n; }
+    while (n > 0) {
+        buf[i++] = (n % 10) + '0';
+        n /= 10;
+    }
+    while (i > 0) write(fd, &buf[--i], 1);
+}
+
+static inline void lock_shm(int semid) {
     struct sembuf op = {0, -1, SEM_UNDO};
     semop(semid, &op, 1);
 }
 
-static inline void unlock_sync(int semid) {
+static inline void unlock_shm(int semid) {
     struct sembuf op = {0, 1, SEM_UNDO};
     semop(semid, &op, 1);
 }
