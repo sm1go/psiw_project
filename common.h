@@ -2,64 +2,88 @@
 #define COMMON_H
 
 #include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <time.h>
+#include <errno.h>
 
-// Stałe IPC
-#define KLUCZ_MSG 12345
-#define KLUCZ_SHM 12346
-#define KLUCZ_SEM 12347
+#define KEY_MSG 1234
+#define KEY_SHM 5678
+#define KEY_SEM 9012
+
+// Jednostki
+#define UNIT_L 0 // Lekka
+#define UNIT_H 1 // Cieżka
+#define UNIT_J 2 // Jazda
+#define UNIT_R 3 // Robotnik
 
 // Typy komunikatów
 #define MSG_LOGIN 1
-#define MSG_AKCJA 2
-#define MSG_UPDATE 3
+#define MSG_CMD   2
+#define MSG_STATE 3
 
-// Typy jednostek
-#define PIECHOTA_LEKKA 0
-#define PIECHOTA_CIEZKA 1
-#define JAZDA 2
-#define ROBOTNICY 3
-
-// Statystyki jednostek (koszt, czas)
-// Zgodnie z tabelą w PDF, ale zdefiniowane jako stałe w kodzie dla wygody
-static const int KOSZT[] = {100, 250, 550, 150};
-static const int CZAS_PROD[] = {2, 3, 5, 2};
-// Atak i obrona jako mnożniki x10 dla operacji na int (unikamy float w kernelu/IPC dla prostoty, lub rzutujemy)
-// PDF podaje np. 1.2. Użyjmy double w logice, ale przesyłamy inty w strukturach gdzie się da.
-static const double ATAK[] = {1.0, 1.5, 3.5, 0.0};
-static const double OBRONA[] = {1.2, 3.0, 1.2, 0.0};
-
-// Struktura gracza w pamięci współdzielonej
-struct GraczInfo {
-    int id; // PID
-    int aktywny;
-    int surowce;
-    int jednostki[4]; // Ilość posiadanych jednostek
-    int w_produkcji[4]; // Ilość zlecana
-    int czas_produkcji[4]; // Czas do końca produkcji
-    int punkty;
-};
-
-// Pamięć współdzielona
-struct StanGry {
-    struct GraczInfo gracze[2];
-    int licznik_graczy;
-    char ostatni_komunikat[256]; // Wiadomość tekstowa o wyniku walki
-};
-
-// Struktura kolejki komunikatów
-struct msgbuf {
+// Struktura wiadomości w kolejce
+typedef struct {
     long mtype;
-    int id_nadawcy; // PID
-    int typ_akcji; // 1=Buduj, 2=Atak
-    int parametry[4]; // [0]=typ, [1]=ilosc
-};
+    int client_id; // 1 lub 2
+    char cmd[10];  // TRAIN, ATTACK
+    int unit_type;
+    int count;
+    char text[512]; // Do przesyłania stanu gry jako tekst
+} msg_buf;
 
-// Struktura aktualizacji dla klienta
-struct msgupdate {
-    long mtype;
-    struct GraczInfo ja;
-    struct GraczInfo wrog;
-    char wiadomosc[256];
-};
+// Struktura pamięci współdzielonej (stan gry)
+typedef struct {
+    int resources[3];      // resources[1] dla gracza 1, [2] dla gracza 2
+    int units[3][4];       // units[gracz][typ]
+    int production_queue[3][4]; // ile jednostek się produkuje
+    int prod_timer[3][4];       // czas do wyprodukowania kolejnej
+    int score[3];
+    int connected_clients;
+} GameState;
+
+// Funkcje pomocnicze do wypisywania (zamiast printf)
+void my_print(const char *s) {
+    write(1, s, strlen(s));
+}
+
+void my_print_int(int n) {
+    char buf[20];
+    int i = 0;
+    if (n == 0) {
+        write(1, "0", 1);
+        return;
+    }
+    int neg = 0;
+    if (n < 0) { neg = 1; n = -n; }
+    while (n > 0) {
+        buf[i++] = (n % 10) + '0';
+        n /= 10;
+    }
+    if (neg) buf[i++] = '-';
+    for (int j = 0; j < i / 2; j++) {
+        char tmp = buf[j];
+        buf[j] = buf[i - j - 1];
+        buf[i - j - 1] = tmp;
+    }
+    write(1, buf, i);
+}
+
+// Konwersja string na int (prosty atoi)
+int my_atoi(char *str) {
+    int res = 0;
+    for (int i = 0; str[i] != '\0'; ++i) {
+        if (str[i] >= '0' && str[i] <= '9')
+            res = res * 10 + str[i] - '0';
+    }
+    return res;
+}
 
 #endif
