@@ -19,6 +19,28 @@ void semaphore_op(int op) {
     semop(sem_id, &sb, 1);
 }
 
+// Funkcja pomocnicza: int na string (zamiast sprintf %d)
+void append_int(char *dest, int n) {
+    char temp[16];
+    int i = 0;
+    if (n == 0) {
+        temp[i++] = '0';
+    } else {
+        while (n > 0) {
+            temp[i++] = (n % 10) + '0';
+            n /= 10;
+        }
+    }
+    temp[i] = '\0';
+    // Odwracamy kolejnosc cyfr
+    for(int j=0; j<i/2; j++) {
+        char t = temp[j];
+        temp[j] = temp[i-1-j];
+        temp[i-1-j] = t;
+    }
+    strcat(dest, temp);
+}
+
 void send_end_game(int winner_id) {
     Message msg;
     msg.cmd = CMD_RESULT;
@@ -26,10 +48,11 @@ void send_end_game(int winner_id) {
 
     for(int i=0; i<2; i++) {
         msg.type = 10 + i;
+        memset(msg.text, 0, MAX_TEXT);
         if (i == winner_id) {
-            sprintf(msg.text, "GRATULACJE! WYGRALES GRE!");
+            strcpy(msg.text, "GRATULACJE! WYGRALES GRE!");
         } else {
-            sprintf(msg.text, "PORAZKA! PRZECIWNIK ZDOBYL 5 PUNKTOW.");
+            strcpy(msg.text, "PORAZKA! PRZECIWNIK ZDOBYL 5 PUNKTOW.");
         }
         msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), 0);
     }
@@ -41,14 +64,25 @@ void send_update() {
     
     for(int i=0; i<2; i++) {
         msg.type = 10 + i;
-        sprintf(msg.text, "ZASOBY: %d | ROB: %d | WIN: %d\nARMIA: L:%d C:%d J:%d\nPRODUKCJA: %d zadan", 
-            game->players[i].resources, 
-            game->players[i].units[UNIT_WORKER], 
-            game->players[i].wins,
-            game->players[i].units[UNIT_LIGHT],
-            game->players[i].units[UNIT_HEAVY],
-            game->players[i].units[UNIT_CAVALRY],
-            game->players[i].q_size);
+        char *t = msg.text;
+        t[0] = '\0';
+
+        strcat(t, "ZASOBY: ");
+        append_int(t, game->players[i].resources);
+        strcat(t, " | ROB: ");
+        append_int(t, game->players[i].units[UNIT_WORKER]);
+        strcat(t, " | WIN: ");
+        append_int(t, game->players[i].wins);
+        strcat(t, "\nARMIA: L:");
+        append_int(t, game->players[i].units[UNIT_LIGHT]);
+        strcat(t, " C:");
+        append_int(t, game->players[i].units[UNIT_HEAVY]);
+        strcat(t, " J:");
+        append_int(t, game->players[i].units[UNIT_CAVALRY]);
+        strcat(t, "\nPRODUKCJA: ");
+        append_int(t, game->players[i].q_size);
+        strcat(t, " zadan");
+
         msgsnd(msg_id, &msg, sizeof(Message)-sizeof(long), IPC_NOWAIT);
     }
 }

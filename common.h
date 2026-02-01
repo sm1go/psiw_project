@@ -1,7 +1,6 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -18,7 +17,7 @@
 #define KEY_SHM 5678
 #define KEY_SEM 9012
 
-#define MAX_TEXT 256
+#define MAX_TEXT 512
 
 #define UNIT_LIGHT 0
 #define UNIT_HEAVY 1
