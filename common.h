@@ -15,12 +15,12 @@
 #define MAX_PLAYERS 2
 #define WIN_THRESHOLD 5
 
-// Kanaly wiadomosci
+// Kanały komunikacji
 #define CHAN_SERVER 100
 #define CHAN_P1     101
 #define CHAN_P2     102
 
-// Akcje
+// Akcje gry
 #define ACT_LOGIN  1
 #define ACT_STATE  2
 #define ACT_BUILD  3
@@ -63,8 +63,11 @@ typedef struct {
 
 union semun { int val; };
 
-// Pomocnicze funkcje I/O na deskryptorach
-static inline void print_s(const char *s) { write(STDOUT_FILENO, s, strlen(s)); }
+// --- FUNKCJE I/O (ZAMIAST PRINTF/SCANF) ---
+
+static inline void print_s(const char *s) { 
+    write(STDOUT_FILENO, s, strlen(s)); 
+}
 
 static inline void print_i(int n) {
     if (n == 0) { write(STDOUT_FILENO, "0", 1); return; }
@@ -80,8 +83,16 @@ static inline int str_to_i(char *s) {
     return res;
 }
 
-// Obsluga semafora
-static inline void lock(int id) { struct sembuf o = {0, -1, SEM_UNDO}; semop(id, &o, 1); }
-static inline void unlock(int id) { struct sembuf o = {0, 1, SEM_UNDO}; semop(id, &o, 1); }
+// --- SYNCHRONIZACJA (JEDEN SEMAFOR) ---
+
+static inline void lock(int id) { 
+    struct sembuf o = {0, -1, SEM_UNDO}; 
+    semop(id, &o, 1); 
+}
+
+static inline void unlock(int id) { 
+    struct sembuf o = {0, 1, SEM_UNDO}; 
+    semop(id, &o, 1); 
+}
 
 #endif
