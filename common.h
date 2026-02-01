@@ -1,76 +1,65 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <unistd.h>
-#include <signal.h>
-#include <time.h>
-#include <math.h>
 
-#define KEY_MSG 1234
-#define KEY_SHM 5678
-#define KEY_SEM 9012
+// Stałe IPC
+#define KLUCZ_MSG 12345
+#define KLUCZ_SHM 12346
+#define KLUCZ_SEM 12347
 
-#define MAX_TEXT 512
+// Typy komunikatów
+#define MSG_LOGIN 1
+#define MSG_AKCJA 2
+#define MSG_UPDATE 3
 
-#define UNIT_LIGHT 0
-#define UNIT_HEAVY 1
-#define UNIT_CAVALRY 2
-#define UNIT_WORKER 3
+// Typy jednostek
+#define PIECHOTA_LEKKA 0
+#define PIECHOTA_CIEZKA 1
+#define JAZDA 2
+#define ROBOTNICY 3
 
-typedef struct {
-    int cost;
-    double attack;
-    double defense;
-    int time;
-} UnitStats;
+// Statystyki jednostek (koszt, czas)
+// Zgodnie z tabelą w PDF, ale zdefiniowane jako stałe w kodzie dla wygody
+static const int KOSZT[] = {100, 250, 550, 150};
+static const int CZAS_PROD[] = {2, 3, 5, 2};
+// Atak i obrona jako mnożniki x10 dla operacji na int (unikamy float w kernelu/IPC dla prostoty, lub rzutujemy)
+// PDF podaje np. 1.2. Użyjmy double w logice, ale przesyłamy inty w strukturach gdzie się da.
+static const double ATAK[] = {1.0, 1.5, 3.5, 0.0};
+static const double OBRONA[] = {1.2, 3.0, 1.2, 0.0};
 
-static const UnitStats UNITS[4] = {
-    {100, 1.0, 1.2, 2},
-    {250, 1.5, 3.0, 3},
-    {550, 3.5, 1.2, 5},
-    {150, 0.0, 0.0, 2}
+// Struktura gracza w pamięci współdzielonej
+struct GraczInfo {
+    int id; // PID
+    int aktywny;
+    int surowce;
+    int jednostki[4]; // Ilość posiadanych jednostek
+    int w_produkcji[4]; // Ilość zlecana
+    int czas_produkcji[4]; // Czas do końca produkcji
+    int punkty;
 };
 
-typedef struct {
-    long type;
-    int source_id;
-    int cmd;
-    int args[5];
-    char text[MAX_TEXT];
-} Message;
+// Pamięć współdzielona
+struct StanGry {
+    struct GraczInfo gracze[2];
+    int licznik_graczy;
+    char ostatni_komunikat[256]; // Wiadomość tekstowa o wyniku walki
+};
 
-typedef struct {
-    int type;
-    int count;
-    int time_left;
-} ProductionTask;
+// Struktura kolejki komunikatów
+struct msgbuf {
+    long mtype;
+    int id_nadawcy; // PID
+    int typ_akcji; // 1=Buduj, 2=Atak
+    int parametry[4]; // [0]=typ, [1]=ilosc
+};
 
-typedef struct {
-    int resources;
-    int units[4];
-    int wins;
-    int workers_active;
-    ProductionTask production_queue[10];
-    int q_size;
-} Player;
-
-typedef struct {
-    Player players[2];
-    int connected_clients;
-    int game_over;
-} GameState;
-
-#define CMD_LOGIN 1
-#define CMD_TRAIN 2
-#define CMD_ATTACK 3
-#define CMD_UPDATE 4
-#define CMD_RESULT 5
+// Struktura aktualizacji dla klienta
+struct msgupdate {
+    long mtype;
+    struct GraczInfo ja;
+    struct GraczInfo wrog;
+    char wiadomosc[256];
+};
 
 #endif
