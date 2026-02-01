@@ -1,110 +1,107 @@
 #include "common.h"
 
+int my_id = 0;
 int msgid;
-int my_id;
+pid_t ui_child_pid;
 
-void str_write(const char *s) {
-    int len = 0;
-    while(s[len]) len++;
-    write(1, s, len);
+void sys_print(const char *text) {
+    write(STDOUT_FILENO, text, strlen(text));
 }
 
-void int_to_str(int n, char *buf) {
-    int i = 0, temp = n;
-    if (n == 0) { buf[0]='0'; buf[1]='\0'; return; }
-    int len = 0;
-    while(temp>0) { temp/=10; len++; }
-    for(i=0; i<len; i++) {
-        buf[len-1-i] = (n%10) + '0';
-        n/=10;
-    }
-    buf[len] = '\0';
-}
+void run_ui_loop() {
+    GameMsg m;
+    char buffer[1024];
+    while(1) {
+        m.mtype = 1;
+        m.player_id = getppid();
+        m.action_type = M_STATE;
+        msgsnd(msgid, &m, sizeof(GameMsg)-sizeof(long), 0);
+        msgrcv(msgid, &m, sizeof(GameMsg)-sizeof(long), getppid(), 0);
 
-void print_num(int n) {
-    char buf[16];
-    int_to_str(n, buf);
-    str_write(buf);
-}
-
-int str_to_int(char *s) {
-    int res = 0;
-    while(*s >= '0' && *s <= '9') {
-        res = res*10 + (*s - '0');
-        s++;
-    }
-    return res;
-}
-
-void display_state(struct Player *p) {
-    str_write("\n------------------------\n");
-    str_write("Gracz "); print_num(p->id); str_write("\n");
-    str_write("Zloto: "); print_num(p->gold); str_write("\n");
-    str_write("Punkty: "); print_num(p->points); str_write("\n");
-    str_write("Jednostki:\n");
-    str_write(" Lekka: "); print_num(p->units[U_LIGHT]); str_write("\n");
-    str_write(" Ciezka: "); print_num(p->units[U_HEAVY]); str_write("\n");
-    str_write(" Jazda: "); print_num(p->units[U_CAV]); str_write("\n");
-    str_write(" Robotnicy: "); print_num(p->units[U_WORK]); str_write("\n");
-    if (p->training.active) {
-        str_write("Trening typ: "); print_num(p->training.unit_type);
-        str_write(" pozostalo: "); print_num(p->training.count); str_write("\n");
-    } else {
-        str_write("Brak aktywnego treningu\n");
-    }
-    str_write("------------------------\n");
-}
-
-int main(int argc, char *argv[]) {
-    msgid = msgget(KEY_MSG, 0666);
-    
-    if (argc > 1) my_id = 2; else my_id = 1;
-
-    str_write("Start Klienta. ID: "); print_num(my_id); str_write("\n");
-    str_write("Komendy: t [typ] [ilosc] (trening), a [typ] [ilosc] (atak)\n");
-    str_write("Typy: 0-Lekka, 1-Ciezka, 2-Jazda, 3-Rob\n");
-
-    if (fork() == 0) {
-        char buf[100];
-        while(1) {
-            int n = read(0, buf, 99);
-            if (n > 0) {
-                buf[n] = 0;
-                struct MsgBuf msg;
-                msg.mtype = my_id;
-                msg.player_id = my_id;
-                
-                char type = buf[0];
-                int u_type = -1;
-                int count = 0;
-                
-                int i = 2;
-                if (buf[1] == ' ') {
-                    u_type = buf[i] - '0';
-                    i += 2;
-                    count = str_to_int(&buf[i]);
-                }
-
-                if ((type == 't' || type == 'a') && u_type >= 0 && count > 0) {
-                    msg.cmd_type = (type == 't') ? 'T' : 'A';
-                    msg.u_type = u_type;
-                    msg.count = count;
-                    msgsnd(msgid, &msg, sizeof(struct MsgBuf)-sizeof(long), 0);
-                }
-            }
+        sys_print("\033[H\033[J"); // Czyści ekran
+        sys_print("============= GRA STRATEGICZNA =============\n");
+        sprintf(buffer, "  GRACZ: %d | Punkty Zwyciestwa: %d/%d\n", my_id, m.points, WIN_POINTS);
+        sys_print(buffer);
+        sys_print("--------------------------------------------\n");
+        sprintf(buffer, "  Zloto: %-8d | Status: %s\n", m.resources, m.status ? "AKTYWNA" : "OCZEKIWANIE");
+        sys_print(buffer);
+        sys_print("--------------------------------------------\n");
+        sys_print("  ARMIA W BAZIE:\n");
+        for(int i=0; i<4; i++) {
+            sprintf(buffer, "  [%d] %-16s : %d\n", i, UNITS[i].name, m.army[i]);
+            sys_print(buffer);
         }
-    } else {
-        struct MsgBuf mb;
-        struct Player p;
-        long listen_type = (my_id == 1) ? 10 : 20;
-        
-        while(1) {
-            if (msgrcv(msgid, &mb, sizeof(struct MsgBuf)-sizeof(long), listen_type, 0) != -1) {
-                char *src = mb.raw_text;
-                char *dest = (char *)&p;
-                for(int i=0; i<sizeof(struct Player); i++) dest[i] = src[i];
-                display_state(&p);
+        sys_print("--------------------------------------------\n");
+        sys_print("  KOMENDY: 1 - Buduj jednostki | 2 - Atakuj\n");
+        sys_print("  Twoj wybor: ");
+
+        if (m.points >= WIN_POINTS) {
+            sys_print("\n\n  *** GRATULACJE! WYGRALES WOJNE! ***\n");
+            kill(getppid(), SIGINT);
+        } else if (m.points == -1) {
+            sys_print("\n\n  *** PORAZKA! TWOJA BAZA UPADLA! ***\n");
+            kill(getppid(), SIGINT);
+        }
+        sleep(1);
+    }
+}
+
+int main() {
+    msgid = msgget(KEY, 0600);
+    if (msgid == -1) { sys_print("Blad: Serwer nie dziala!\n"); return 1; }
+
+    GameMsg m;
+    m.mtype = 1;
+    m.player_id = getpid();
+    m.action_type = M_LOGIN;
+    msgsnd(msgid, &m, sizeof(GameMsg)-sizeof(long), 0);
+    msgrcv(msgid, &m, sizeof(GameMsg)-sizeof(long), getpid(), 0);
+
+    if (m.player_id == -1) { sys_print("Serwer pelny!\n"); return 0; }
+    my_id = m.player_id;
+
+    if ((ui_child_pid = fork()) == 0) {
+        run_ui_loop();
+        exit(0);
+    }
+
+    char in_buf[16];
+    while(1) {
+        int bytes = read(STDIN_FILENO, in_buf, 15);
+        if (bytes <= 0) continue;
+        in_buf[bytes] = '\0';
+        int choice = atoi(in_buf);
+
+        if (choice == 1) {
+            kill(ui_child_pid, SIGSTOP);
+            sys_print("\n--- BUDOWANIE ---\nTyp (0-Lekka, 1-Ciezka, 2-Jazda, 3-Rob): ");
+            bytes = read(STDIN_FILENO, in_buf, 15); in_buf[bytes] = '\0';
+            int type = atoi(in_buf);
+            sys_print("Ilosc: ");
+            bytes = read(STDIN_FILENO, in_buf, 15); in_buf[bytes] = '\0';
+            int count = atoi(in_buf);
+
+            m.mtype = 1;
+            m.player_id = my_id;
+            m.action_type = M_BUILD;
+            m.unit_idx = type;
+            m.count = count;
+            msgsnd(msgid, &m, sizeof(GameMsg)-sizeof(long), 0);
+            kill(ui_child_pid, SIGCONT);
+        } 
+        else if (choice == 2) {
+            kill(ui_child_pid, SIGSTOP);
+            sys_print("\n--- ATAK (Podaj ilosci) ---\n");
+            m.mtype = 1;
+            m.player_id = my_id;
+            m.action_type = M_ATTACK;
+            for(int i=0; i<3; i++) {
+                sprintf(in_buf, " %s: ", UNITS[i].name); sys_print(in_buf);
+                bytes = read(STDIN_FILENO, in_buf, 15); in_buf[bytes] = '\0';
+                m.army[i] = atoi(in_buf);
             }
+            msgsnd(msgid, &m, sizeof(GameMsg)-sizeof(long), 0);
+            kill(ui_child_pid, SIGCONT);
         }
     }
     return 0;
