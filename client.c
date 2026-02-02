@@ -31,23 +31,23 @@ void run_display() {
         print_s("--------------------------------------------\n");
         print_s("1: Buduj jednostki | 2: Atakuj baze wroga\nTwoj wybor: ");
 
-        // LOGIKA KONCA GRY
-        if (m.score >= WIN_THRESHOLD) {
-            print_s("\n\n============================================\n");
-            print_s("   KONIEC GRY: PRZEGRALES, GRACZ O ID "); print_i(my_player_id); print_s(" WYGRAL!\n");
-            print_s("============================================\n");
-            sleep(1);
-            kill(getppid(), SIGINT); // Zamknij proces glowny
-        } else if (m.score == -1) {
-            int winner_id = (my_player_id == 1) ? 2 : 1;
-            print_s("\n\n============================================\n");
-            print_s("   KONIEC GRY: WYGRALES");
-            print_s("============================================\n");
-            sleep(1);
-            kill(getppid(), SIGINT); // Zamknij proces glowny
-        }
-        sleep(1);
-    }
+   // LOGIKA KONCA GRY
+           if (m.score >= WIN_THRESHOLD) {
+               // Ten blok wykona się tylko u gracza, który osiągnął limit punktów
+               print_s("\n\n============================================\n");
+               print_s("   *** GRATULACJE! WYGRALES WOJNE! *** \n");
+               print_s("============================================\n");
+               sleep(2); // Dajemy chwilę na przeczytanie
+               kill(getppid(), SIGINT); // Zamykamy proces klawiatury i wychodzimy
+           } 
+           else if (m.score == -1) {
+               // Ten blok wykona się u gracza, któremu serwer wysłał sygnał porażki
+               print_s("\n\n============================================\n");
+               print_s("   *** PRZEGRALES! TWOJA BAZA UPADLA *** \n");
+               print_s("============================================\n");
+               sleep(2);
+               kill(getppid(), SIGINT);
+           }
 }
 
 int main() {
