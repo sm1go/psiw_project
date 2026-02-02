@@ -34,14 +34,14 @@ void run_display() {
         // LOGIKA KONCA GRY
         if (m.score >= WIN_THRESHOLD) {
             print_s("\n\n============================================\n");
-            print_s("   KONIEC GRY: GRACZ O ID "); print_i(my_player_id); print_s(" WYGRAL!\n");
+            print_s("   KONIEC GRY: PRZEGRALES, GRACZ O ID "); print_i(my_player_id); print_s(" WYGRAL!\n");
             print_s("============================================\n");
             sleep(1);
             kill(getppid(), SIGINT); // Zamknij proces glowny
         } else if (m.score == -1) {
             int winner_id = (my_player_id == 1) ? 2 : 1;
             print_s("\n\n============================================\n");
-            print_s("   KONIEC GRY: GRACZ O ID "); print_i(winner_id); print_s(" WYGRAL!\n");
+            print_s("   KONIEC GRY: WYGRALES");
             print_s("============================================\n");
             sleep(1);
             kill(getppid(), SIGINT); // Zamknij proces glowny
