@@ -1,0 +1,22 @@
+PROTOKÓŁ KOMUNIKACJI IPC
+
+1. KOLEJKI KOMUNIKATÓW (Message Queues):
+   - Klucz: 12345 (PROJECT_KEY)
+   - Struktura 'Msg':
+     * mtype: 100 (do serwera), 101/102 (do klientów), lub PID klienta (przy logowaniu).
+     * sender_pid: PID procesu klienta.
+     * action: Typ akcji (LOGIN, STATE, BUILD, ATTACK).
+     * u_type/u_count: Szczegóły rekrutacji.
+     * army[4]/gold/score: Dane przesyłane do odświeżenia interfejsu.
+
+2. PAMIĘĆ WSPÓŁDZIELONA (Shared Memory):
+   - Struktura 'GameData':
+     * gold[2]: Ilość złota dla każdego gracza.
+     * army[2][4]: Liczebność jednostek każdego typu.
+     * score[2]: Punkty zwycięstwa.
+     * running: Flaga określająca stan gry.
+
+3. SEMAFORY:
+   - Zestaw 1 semafora typu binarnego (mutex).
+   - Zabezpiecza dostęp do struktury GameData w pamięci współdzielonej, 
+     zapobiegając race conditions podczas jednoczesnych aktualizacji (np. bitwa i przyrost złota).
