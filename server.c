@@ -1,900 +1,118 @@
 #include "common.h"
 
-int mid, sid, semid;
-GameData *game;
+int my_player_id = 0;
+int mid;
+pid_t ui_pid;
 
-// Funkcja zwalniająca zasoby systemowe
-void cleanup_server(int s) {
-    msgctl(mid, IPC_RMID, NULL); // Usuwa kolejkę komunikatów
-    shmctl(sid, IPC_RMID, NULL); // Usuwa pamięć współdzieloną
-    semctl(semid, 0, IPC_RMID);  // Usuwa semafor
-    print_s("[SERWER] Zasoby zwolnione. Koniec pracy.\n");
-    exit(0);
+void quit_client(int s) { 
+    if (ui_pid > 0) kill(ui_pid, SIGKILL); 
+    exit(0); 
+}
+
+void run_display() {
+    Msg m;
+    while(1) {
+        m.mtype = CHAN_SERVER;
+        m.player_id = my_player_id;
+        m.action = ACT_STATE;
+        
+        // Jeśli serwer już usunął kolejkę, msgsnd zwróci błąd - wtedy kończymy
+        if (msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0) == -1) {
+            print_s("\n[BŁĄD] Utracono połączenie z serwerem.\n");
+            kill(getppid(), SIGINT);
+            break;
+        }
+
+        if (msgrcv(mid, &m, sizeof(Msg)-sizeof(long), (my_player_id == 1) ? CHAN_P1 : CHAN_P2, 0) == -1) {
+            kill(getppid(), SIGINT);
+            break;
+        }
+
+        print_s("\033[H\033[J"); // Czyszczenie ekranu
+        print_s("=== GRA STRATEGICZNA | TWOJE ID: "); print_i(my_player_id); print_s(" ===\n");
+        print_s("Punkty: "); print_i(m.score == -1 ? 0 : m.score); print_s("/"); print_i(WIN_THRESHOLD);
+        print_s(" | Zloto: "); print_i(m.gold); 
+        print_s(" | Status: "); print_s(m.active ? "GRA TRWA\n" : "OCZEKIWANIE NA PRZECIWNIKA\n");
+        print_s("--------------------------------------------\n");
+        for(int i=0; i<4; i++) {
+            print_s("["); print_i(i); print_s("] "); print_s(STATS[i].name);
+            print_s(": "); print_i(m.army[i]); print_s("\n");
+        }
+        print_s("--------------------------------------------\n");
+        print_s("1: Buduj jednostki | 2: Atakuj baze wroga\nTwoj wybor: ");
+
+        // --- POPRAWIONA LOGIKA KOMUNIKATÓW ---
+        if (m.score >= WIN_THRESHOLD) {
+            print_s("\n\n============================================\n");
+            print_s("                WYGRANA!                    \n");
+            print_s("============================================\n");
+            sleep(2);
+            kill(getppid(), SIGINT); 
+            break;
+        } else if (m.score == -1) {
+            print_s("\n\n============================================\n");
+            print_s("               PRZEGRANA...                 \n");
+            print_s("============================================\n");
+            sleep(2);
+            kill(getppid(), SIGINT); 
+            break;
+        }
+        sleep(1);
+    }
 }
 
 int main() {
-    signal(SIGINT, cleanup_server);
-    signal(SIGCHLD, SIG_IGN);
+    signal(SIGINT, quit_client);
+    mid = msgget(PROJECT_KEY, 0600);
+    if (mid == -1) { print_s("Blad: Serwer nie jest uruchomiony!\n"); return 1; }
 
-    // Inicjalizacja zasobów IPC
-    mid = msgget(PROJECT_KEY, IPC_CREAT | 0600);
-    sid = shmget(PROJECT_KEY, sizeof(GameData), IPC_CREAT | 0600);
-    semid = semget(PROJECT_KEY, 1, IPC_CREAT | 0600);
-    
-    union semun a; a.val = 1;
-    semctl(semid, 0, SETVAL, a);
-
-    game = (GameData*)shmat(sid, NULL, 0);
-    memset(game, 0, sizeof(GameData));
-    game->gold[0] = 300; game->gold[1] = 300;
-
-    print_s("[SERWER] Gra strategiczna 2025 uruchomiona.\n");
-
-    // Proces przyrostu surowców (wykonuje się w tle)
-    if (fork() == 0) { 
-        while(1) {
-            sleep(1);
-            lock(semid);
-            if (game->running) {
-                for(int i=0; i<2; i++) 
-                    game->gold[i] += 50 + (game->army[i][3] * 5);
-            }
-            unlock(semid);
-        }
-    }
-
-    int players_count = 0;
     Msg m;
+    m.mtype = CHAN_SERVER;
+    m.sender_pid = getpid();
+    m.action = ACT_LOGIN;
+    msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
+    msgrcv(mid, &m, sizeof(Msg)-sizeof(long), getpid(), 0);
+
+    if (m.player_id == -1) { print_s("Serwer pelny. Sprobuj pozniej.\n"); return 0; }
+    my_player_id = m.player_id;
+
+    if ((ui_pid = fork()) == 0) { 
+        run_display(); 
+        exit(0); 
+    }
+
+    char buffer[32];
     while(1) {
-        // Oczekiwanie na komunikat od klienta
-        if (msgrcv(mid, &m, sizeof(Msg)-sizeof(long), CHAN_SERVER, 0) == -1) continue;
+        int n = read(STDIN_FILENO, buffer, 31);
+        if (n <= 0) continue;
+        buffer[n-1] = '\0';
+        int choice = str_to_i(buffer);
 
-        if (m.action == ACT_LOGIN) {
-            lock(semid);
-            long return_pid = m.sender_pid;
-            if (players_count < 2) {
-                m.player_id = ++players_count;
-                if (players_count == 2) game->running = 1;
-                print_s("Gracz "); print_i(m.player_id); print_s(" zalogowany.\n");
-            } else m.player_id = -1;
-            m.mtype = return_pid;
+        if (choice == 1) {
+            kill(ui_pid, SIGSTOP);
+            print_s("\n[BUDOWA] Typ (0-3): "); n = read(STDIN_FILENO, buffer, 31);
+            if (n>0) buffer[n-1] = '\0';
+            int t = str_to_i(buffer);
+            print_s("Ilosc: "); n = read(STDIN_FILENO, buffer, 31);
+            if (n>0) buffer[n-1] = '\0';
+            int q = str_to_i(buffer);
+            m.mtype = CHAN_SERVER; m.player_id = my_player_id; m.action = ACT_BUILD;
+            m.u_type = t; m.u_count = q;
             msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-            unlock(semid);
-        } 
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
+            kill(ui_pid, SIGCONT);
+        } else if (choice == 2) {
+            kill(ui_pid, SIGSTOP);
+            print_s("\n[ATAK] Podaj jednostki do wyslania:\n");
+            m.mtype = CHAN_SERVER; m.player_id = my_player_id; m.action = ACT_ATTACK;
+            for(int i=0; i<3; i++) {
+                print_s(" "); print_s(STATS[i].name); print_s(": ");
+                n = read(STDIN_FILENO, buffer, 31);
+                if (n>0) buffer[n-1] = '\0';
+                m.army[i] = str_to_i(buffer);
             }
-            unlock(semid);
-        }
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
             msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        // ... (początek pliku bez zmian) ...
-
-        else if (m.action == ACT_STATE) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            
-            lock(semid);
-            m.mtype = (m.player_id == 1) ? CHAN_P1 : CHAN_P2;
-            m.gold = game->gold[p];
-            m.score = game->score[p];
-            m.active = game->running;
-            for(int i=0; i<4; i++) m.army[i] = game->army[p][i];
-            
-            // Jeśli przeciwnik wygrał, ustawiamy -1 (znacznik porażki)
-            if (game->score[enemy] >= WIN_THRESHOLD) m.score = -1; 
-            
-            // NAJPIERW WYŚLIJ, POTEM CZEKAJ NA ZAMKNIĘCIE
-            msgsnd(mid, &m, sizeof(Msg)-sizeof(long), 0);
-
-            // Sprawdzamy czy gra się skończyła
-            if (game->score[p] >= WIN_THRESHOLD || game->score[enemy] >= WIN_THRESHOLD) {
-                print_s("[SERWER] Wykryto koniec gry. Zamykanie za 3 sekundy...\n");
-                unlock(semid);
-                sleep(3); // Dajemy czas OBU klientom na odebranie ostatniej wiadomości
-                cleanup_server(0);
-            }
-            unlock(semid);
-        }
-// ... (reszta pliku bez zmian) ...
-        }
-        else if (m.action == ACT_BUILD) {
-            int p = m.player_id - 1;
-            int total_cost = STATS[m.u_type].cost * m.u_count;
-            lock(semid);
-            if (p >= 0 && game->gold[p] >= total_cost) {
-                game->gold[p] -= total_cost;
-                unlock(semid);
-                if (fork() == 0) { // Proces budowy jednostek
-                    for(int i=0; i<m.u_count; i++) {
-                        sleep(STATS[m.u_type].time);
-                        lock(semid); game->army[p][m.u_type]++; unlock(semid);
-                    }
-                    exit(0);
-                }
-            } else unlock(semid);
-        }
-        else if (m.action == ACT_ATTACK) {
-            int p = m.player_id - 1;
-            int enemy = (p == 0) ? 1 : 0;
-            lock(semid);
-            int can_atk = 1;
-            for(int i=0; i<3; i++) if(game->army[p][i] < m.army[i]) can_atk = 0;
-            if (can_atk) {
-                for(int i=0; i<3; i++) game->army[p][i] -= m.army[i];
-                unlock(semid);
-                if (fork() == 0) { // Proces bitwy
-                    int squad[4]; for(int i=0; i<4; i++) squad[i] = m.army[i];
-                    sleep(5);
-                    lock(semid);
-                    float sa=0, sb=0, esa=0, esb=0;
-                    for(int i=0; i<3; i++) {
-                        sa += squad[i] * STATS[i].atk; 
-                        sb += game->army[enemy][i] * STATS[i].def;
-                        esa += game->army[enemy][i] * STATS[i].atk; 
-                        esb += squad[i] * STATS[i].def;
-                    }
-                    if (sa > sb) { 
-                        game->score[p]++; // Aktualizacja wyniku w pamięci współdzielonej
-                        for(int i=0; i<3; i++) game->army[enemy][i] = 0; 
-                    } else { 
-                        float r = (sb > 0) ? sa/sb : 0; 
-                        for(int i=0; i<3; i++) game->army[enemy][i] -= (int)(game->army[enemy][i]*r); 
-                    }
-                    if (esa > esb) { for(int i=0; i<3; i++) squad[i] = 0; }
-                    else { 
-                        float r = (esb > 0) ? esa/esb : 0; 
-                        for(int i=0; i<3; i++) squad[i] -= (int)(squad[i]*r); 
-                    }
-                    for(int i=0; i<3; i++) game->army[p][i] += squad[i];
-                    unlock(semid); exit(0);
-                }
-            } else unlock(semid);
+            kill(ui_pid, SIGCONT);
         }
     }
+    return 0;
 }
